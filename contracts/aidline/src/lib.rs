@@ -1405,8 +1405,9 @@ impl Aidline {
             return Err(Error::AdvanceAlreadyTaken);
         }
 
-        // Cap: 20% of goal, rounded down (favors the contract, never exceeds).
-        let cap = campaign.goal * EMERGENCY_ADVANCE_BPS / BPS_DENOM;
+        // Cap: 20% of goal, rounded down, and never more than milestone 0.
+        let m0 = campaign.milestones.get(0).ok_or(Error::NoMilestonesLeft)?;
+        let cap = (campaign.goal * EMERGENCY_ADVANCE_BPS / BPS_DENOM).min(m0);
 
         // Available escrow = raised − already released.
         let available = campaign.raised - campaign.released;
@@ -1610,7 +1611,7 @@ impl Aidline {
         } else {
             0
         };
-        let remaining = milestone_amount - already_paid;
+        let remaining = milestone_amount.saturating_sub(already_paid);
 
         let available = campaign.raised - campaign.released;
         if available < remaining {

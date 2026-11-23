@@ -49,7 +49,7 @@ Expiry is computed from the ledger timestamp rather than stored, so no one needs
 For `Emergency` campaigns, the assigned verifier can release an emergency fast-track advance immediately, before milestone one is completed. 
 This provides critical funds in the first hours of a disaster without waiting for a full milestone to be funded or proven.
 
-- **Cap:** The advance is hard-capped at 20% of the campaign's total goal.
+- **Cap:** The advance is hard-capped at `min(20% of the campaign's total goal, milestone 0 allocation)`.
 - **Escrow requirements:** The advance cannot exceed the currently available unreleased escrow.
 - **Accounting:** The advance is recorded against milestone one (`milestones[0]`). When the verifier later formally approves milestone one, the contract only transfers the remaining balance (if any) of that milestone to the beneficiary. The total funds released for milestone one never exceed its scheduled amount.
 - **Security:** Only the registered verifier can trigger the fast track. It is only available for `Emergency` campaigns, and only once per campaign.
