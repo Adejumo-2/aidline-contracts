@@ -428,7 +428,7 @@ To help contributors understand the impact of contract changes, the following ta
 
 ### How to regenerate the table
 
-Maintainers can regenerate these measurements using the built-in test environment. The test `test_measure_resource_costs` in `contracts/aidline/src/test.rs` executes each entry point and resets the budget.
+Maintainers can regenerate these measurements using the built-in test environment. The test `test_measure_resource_costs` in `contracts/aidline/src/test/costs_and_events.rs` executes each entry point and resets the budget.
 
 1. Ensure you have the Soroban CLI and test tools installed.
 2. Run the test and capture the output:
