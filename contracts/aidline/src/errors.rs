@@ -80,4 +80,9 @@ pub enum Error {
 
     // Milestone due date
     MilestoneOverdue = 42,
+
+    // Timelock
+    ActionNotFound = 43,
+    TimelockNotReady = 44,
+    ActionExpired = 45,
 }

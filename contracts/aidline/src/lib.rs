@@ -21,11 +21,12 @@ use soroban_sdk::{
 
 pub use errors::Error;
 pub use types::{
-    BondStatus, Campaign, CampaignKind, CampaignStatus, Pledge, SponsorPool, VerifierBond,
+    BondStatus, Campaign, CampaignKind, CampaignStatus, Pledge, QueuedAction, SponsorPool,
+    TimelockedAction, VerifierBond,
 };
 
 use events::{
-    AdminAccepted, AdminChanged, AdminProposed, BondSlashed, BondWithdrawn, CampaignCancelled,
+    ActionCancelled, ActionExecuted, ActionQueued, AdminAccepted, AdminChanged, AdminProposed, BondSlashed, BondWithdrawn, CampaignCancelled,
     CampaignCancelledWithReason, CampaignCreated, ContractPaused, ContractUnpaused,
     ContractUpgraded, DeadlineExtended, Donated, EmergencyAdvanceReleased, MatchingApplied,
     MetadataUpdated, MilestoneApproved, MilestoneRejected, MilestoneReleased, PlatformFeeUpdated,
@@ -52,6 +53,12 @@ const MAX_DEADLINE_EXTENSION: u64 = 30 * 86_400;
 
 /// Maximum number of times a campaign's verifier may be reassigned.
 pub const MAX_VERIFIER_REASSIGNMENTS: u32 = 2;
+
+/// Seconds a queued admin action must wait before anyone may execute it.
+pub const TIMELOCK_DELAY: u64 = 2 * 86_400;
+
+/// Seconds after the delay during which a queued action can still be executed.
+pub const TIMELOCK_GRACE_PERIOD: u64 = 7 * 86_400;
 /// Maximum page limit for paginated donor enumeration.
 const MAX_DONORS_PAGE_LIMIT: u32 = 50;
 
@@ -528,7 +535,15 @@ impl Aidline {
         slash_amount: i128,
     ) -> Result<(), Error> {
         storage::admin(&env).require_auth();
+        Self::slash_verifier_impl(env, verifier, campaign_id, slash_amount)
+    }
 
+    fn slash_verifier_impl(
+        env: Env,
+        verifier: Address,
+        campaign_id: u64,
+        slash_amount: i128,
+    ) -> Result<(), Error> {
         if slash_amount <= 0 {
             return Err(Error::InvalidAmount);
         }
@@ -1830,7 +1845,14 @@ impl Aidline {
         new_verifier: Address,
     ) -> Result<(), Error> {
         storage::admin(&env).require_auth();
+        Self::reassign_verifier_impl(env, campaign_id, new_verifier)
+    }
 
+    fn reassign_verifier_impl(
+        env: Env,
+        campaign_id: u64,
+        new_verifier: Address,
+    ) -> Result<(), Error> {
         let mut campaign = storage::campaign(&env, campaign_id)?;
         Self::ensure_open(&env, &campaign)?;
 
@@ -1859,6 +1881,84 @@ impl Aidline {
         .publish(&env);
 
         Ok(())
+    }
+
+    // ─── Timelock (issue #113) ────────────────────────────────────────────────
+
+    /// Queues a sensitive admin `action` and returns its id.
+    ///
+    /// Only the admin may call this. The action can be executed by anyone once
+    /// [`TIMELOCK_DELAY`] seconds have passed, and stays executable for
+    /// [`TIMELOCK_GRACE_PERIOD`] seconds after that. Emits [`ActionQueued`].
+    pub fn queue_action(env: Env, action: TimelockedAction) -> u64 {
+        storage::admin(&env).require_auth();
+        let action_id = storage::next_action_id(&env);
+        let eta = env.ledger().timestamp() + TIMELOCK_DELAY;
+        storage::save_queued_action(&env, action_id, &QueuedAction { action, eta });
+        ActionQueued { action_id, eta }.publish(&env);
+        action_id
+    }
+
+    /// Cancels a queued action before it is executed.
+    ///
+    /// Only the admin may call this. Emits [`ActionCancelled`].
+    ///
+    /// # Errors
+    /// - [`Error::ActionNotFound`]: no queued action with `action_id` exists.
+    pub fn cancel_action(env: Env, action_id: u64) -> Result<(), Error> {
+        storage::admin(&env).require_auth();
+        storage::queued_action(&env, action_id).ok_or(Error::ActionNotFound)?;
+        storage::remove_queued_action(&env, action_id);
+        ActionCancelled { action_id }.publish(&env);
+        Ok(())
+    }
+
+    /// Executes a queued action once its delay has elapsed.
+    ///
+    /// Callable by anyone. The inner action runs with the same checks as its
+    /// direct admin entry point. Emits [`ActionExecuted`].
+    ///
+    /// # Errors
+    /// - [`Error::ActionNotFound`]: no queued action with `action_id` exists.
+    /// - [`Error::TimelockNotReady`]: the delay has not elapsed yet.
+    /// - [`Error::ActionExpired`]: the grace period has passed.
+    pub fn execute_action(env: Env, action_id: u64) -> Result<(), Error> {
+        let queued = storage::queued_action(&env, action_id).ok_or(Error::ActionNotFound)?;
+        let now = env.ledger().timestamp();
+        if now < queued.eta {
+            return Err(Error::TimelockNotReady);
+        }
+        if now > queued.eta + TIMELOCK_GRACE_PERIOD {
+            return Err(Error::ActionExpired);
+        }
+        storage::remove_queued_action(&env, action_id);
+
+        match queued.action {
+            TimelockedAction::ReassignVerifier(campaign_id, new_verifier) => {
+                Self::reassign_verifier_impl(env.clone(), campaign_id, new_verifier)?
+            }
+            TimelockedAction::SlashVerifier(verifier, campaign_id, slash_amount) => {
+                Self::slash_verifier_impl(env.clone(), verifier, campaign_id, slash_amount)?
+            }
+            TimelockedAction::SetBondRequirement(amount) => {
+                if amount < 0 {
+                    return Err(Error::InvalidAmount);
+                }
+                storage::set_bond_requirement(&env, amount);
+            }
+            TimelockedAction::SetBondWithdrawDelay(delay) => {
+                storage::set_bond_withdraw_delay(&env, delay);
+            }
+        }
+
+        ActionExecuted { action_id }.publish(&env);
+        Ok(())
+    }
+
+    /// Returns the queued action `action_id`, or `None` if it was never queued,
+    /// cancelled or executed.
+    pub fn queued_action(env: Env, action_id: u64) -> Option<QueuedAction> {
+        storage::queued_action(&env, action_id)
     }
 
     // ─── Views ────────────────────────────────────────────────────────────────

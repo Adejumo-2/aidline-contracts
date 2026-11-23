@@ -1,7 +1,7 @@
 use soroban_sdk::{Address, Env, String, Vec};
 
 use crate::errors::Error;
-use crate::types::{Campaign, DataKey, Pledge, SponsorPool, VerifierBond};
+use crate::types::{Campaign, DataKey, Pledge, QueuedAction, SponsorPool, VerifierBond};
 
 const DAY_IN_LEDGERS: u32 = 17_280;
 const INSTANCE_BUMP: u32 = 30 * DAY_IN_LEDGERS;
@@ -139,6 +139,37 @@ pub fn set_contribution(env: &Env, id: u64, donor: &Address, amount: i128) {
         env.storage().persistent().set(&key, &amount);
         bump(env, &key);
     }
+}
+
+pub fn next_action_id(env: &Env) -> u64 {
+    let id: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::NextActionId)
+        .unwrap_or(0);
+    env.storage()
+        .instance()
+        .set(&DataKey::NextActionId, &(id + 1));
+    id
+}
+
+pub fn queued_action(env: &Env, id: u64) -> Option<QueuedAction> {
+    let key = DataKey::QueuedAction(id);
+    let queued = env.storage().persistent().get(&key)?;
+    bump(env, &key);
+    Some(queued)
+}
+
+pub fn save_queued_action(env: &Env, id: u64, queued: &QueuedAction) {
+    let key = DataKey::QueuedAction(id);
+    env.storage().persistent().set(&key, queued);
+    bump(env, &key);
+}
+
+pub fn remove_queued_action(env: &Env, id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::QueuedAction(id));
 }
 
 pub fn campaign_donors(env: &Env, campaign_id: u64) -> Vec<Address> {

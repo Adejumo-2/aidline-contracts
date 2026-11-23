@@ -98,6 +98,29 @@ pub struct SponsorPool {
     pub matched: i128,
 }
 
+/// A sensitive admin action that must wait out the timelock before it runs (Issue #113).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TimelockedAction {
+    /// `reassign_verifier(campaign_id, new_verifier)`
+    ReassignVerifier(u64, Address),
+    /// `slash_verifier(verifier, campaign_id, slash_amount)`
+    SlashVerifier(Address, u64, i128),
+    /// `set_bond_requirement(amount)`
+    SetBondRequirement(i128),
+    /// `set_bond_withdraw_delay(delay)`
+    SetBondWithdrawDelay(u64),
+}
+
+/// An action waiting in the timelock queue.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueuedAction {
+    pub action: TimelockedAction,
+    /// Earliest ledger timestamp (seconds) at which anyone may execute the action.
+    pub eta: u64,
+}
+
 /// Bond status for verifier bond accounting (Issue #29).
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -176,4 +199,7 @@ pub enum DataKey {
     VerifierProfile(Address),
     // Paginated donors list
     CampaignDonors(u64),
+    // Issue #113: timelock queue
+    NextActionId,
+    QueuedAction(u64),
 }

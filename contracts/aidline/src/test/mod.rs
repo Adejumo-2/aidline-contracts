@@ -147,6 +147,7 @@ mod pause;
 mod pledges;
 mod property;
 mod refunds;
+mod timelock;
 mod tokens;
 mod upgrade;
 mod verifier_reassignment;
