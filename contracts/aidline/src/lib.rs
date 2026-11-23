@@ -1054,6 +1054,8 @@ impl Aidline {
         storage::save_campaign(&env, &campaign);
         let previous = storage::contribution(&env, campaign_id, &donor);
         storage::set_contribution(&env, campaign_id, &donor, previous + accepted);
+        let unmatched = storage::unmatched_donation(&env, campaign_id, &donor);
+        storage::set_unmatched_donation(&env, campaign_id, &donor, unmatched + accepted);
         storage::add_campaign_donor(&env, campaign_id, &donor);
 
         Donated {
@@ -1145,7 +1147,9 @@ impl Aidline {
     /// the campaign's raised total.
     ///
     /// Any account may call this. The match is computed as
-    /// `donation_amount * ratio_bps / 10_000`, clamped to the pool's cap
+    /// `min(donation_amount, donor's unmatched donations) * ratio_bps / 10_000`,
+    /// so only real donations that were not matched before can be matched. It is
+    /// clamped to the pool's cap
     /// headroom, remaining balance, and campaign headroom. Returns the actual
     /// matched amount (may be `0` if the pool is exhausted or the donation is
     /// too small). Emits [`MatchingApplied`] when the matched amount is > 0.
@@ -1175,7 +1179,14 @@ impl Aidline {
         let mut campaign = storage::campaign(&env, campaign_id)?;
         Self::ensure_open(&env, &campaign)?;
 
-        let raw_match = donation_amount
+        // Only real, not yet matched donations by `donor` can be matched.
+        let unmatched = storage::unmatched_donation(&env, campaign_id, &donor);
+        let eligible = donation_amount.min(unmatched);
+        if eligible <= 0 {
+            return Ok(0);
+        }
+
+        let raw_match = eligible
             .checked_mul(pool.ratio_bps as i128)
             .ok_or(Error::InvalidAmount)?
             / 10_000_i128;
@@ -1197,6 +1208,15 @@ impl Aidline {
             return Ok(0);
         }
 
+        // Consume the part of the donation that this match covers (rounded up),
+        // so the same donation cannot be matched again.
+        let consumed = eligible
+            .checked_mul(matched_amount)
+            .map(|x| (x + raw_match - 1) / raw_match)
+            .unwrap_or(eligible)
+            .min(eligible);
+        storage::set_unmatched_donation(&env, campaign_id, &donor, unmatched - consumed);
+
         pool.remaining -= matched_amount;
         pool.matched += matched_amount;
         storage::save_sponsor_pool(&env, &pool);
@@ -1211,7 +1231,7 @@ impl Aidline {
             campaign_id,
             sponsor: sponsor.clone(),
             donor,
-            donation_amount,
+            donation_amount: eligible,
             matched_amount,
         }
         .publish(&env);

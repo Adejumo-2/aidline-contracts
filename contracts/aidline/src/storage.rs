@@ -141,6 +141,21 @@ pub fn set_contribution(env: &Env, id: u64, donor: &Address, amount: i128) {
     }
 }
 
+pub fn unmatched_donation(env: &Env, id: u64, donor: &Address) -> i128 {
+    let key = DataKey::UnmatchedDonation(id, donor.clone());
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+pub fn set_unmatched_donation(env: &Env, id: u64, donor: &Address, amount: i128) {
+    let key = DataKey::UnmatchedDonation(id, donor.clone());
+    if amount <= 0 {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, &amount);
+        bump(env, &key);
+    }
+}
+
 pub fn campaign_donors(env: &Env, campaign_id: u64) -> Vec<Address> {
     let key = DataKey::CampaignDonors(campaign_id);
     if let Some(donors) = env.storage().persistent().get(&key) {
