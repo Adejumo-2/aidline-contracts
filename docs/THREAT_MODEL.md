@@ -42,7 +42,7 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) first for the roles, storage and lifecyc
 | Removed verifier locks funds                       | Creator or admin can cancel, which opens refunds. Admin can also reassign the verifier (capped at 2 reassignments)         | Mitigated      |
 | Compromised admin rotates verifier indefinitely ("verifier shopping") | Reassignments capped at 2 per campaign (`MAX_VERIFIER_REASSIGNMENTS`); count is visible in campaign record and view | Mitigated      |
 | Verifier approves false work                       | Verifier bonds, withdrawal delay and admin slashing, with slashed funds flowing to the campaign's donors                    | Partly open    |
-| Verifier colludes with the beneficiary             | A campaign can currently name the same address as verifier and beneficiary. See [issue #14](https://github.com/aidline-org/aidline-contracts/issues/14) | Open           |
+| Verifier colludes with the beneficiary             | Campaign creation and `reassign_verifier` reject a verifier who is also the creator or beneficiary (`Error::ConflictOfInterest`). Colluding through separate addresses is still possible | Mitigated      |
 | Oversized metadata or proof URI bloats storage     | No length limit yet. See [issue #13](https://github.com/aidline-org/aidline-contracts/issues/13)                           | Open           |
 | Pledge allowance revoked to dodge a commitment     | Skipped without reverting, by design. Pledges are supplementary, not guaranteed funding                                    | Accepted       |
 | Storage entry expires on a long campaign           | TTLs are extended on every read and write. A very long campaign may need an off chain keeper                               | Open           |

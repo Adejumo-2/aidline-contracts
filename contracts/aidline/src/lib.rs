@@ -1824,6 +1824,8 @@ impl Aidline {
     /// - [`Error::CampaignNotActive`]: campaign is not in `Active` status.
     /// - [`Error::CampaignExpired`]: campaign deadline has passed.
     /// - [`Error::NotVerifier`]: `new_verifier` is not currently registered.
+    /// - [`Error::ConflictOfInterest`]: `new_verifier` is the campaign's creator
+    ///   or beneficiary.
     pub fn reassign_verifier(
         env: Env,
         campaign_id: u64,
@@ -1840,6 +1842,10 @@ impl Aidline {
 
         if !storage::is_verifier(&env, &new_verifier) {
             return Err(Error::NotVerifier);
+        }
+
+        if new_verifier == campaign.beneficiary || new_verifier == campaign.creator {
+            return Err(Error::ConflictOfInterest);
         }
 
         let old_verifier = campaign.verifier.clone();
