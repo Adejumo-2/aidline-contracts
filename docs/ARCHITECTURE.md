@@ -290,7 +290,7 @@ After deregistration the verifier must wait at least `bond_withdraw_delay` secon
 1. Requires auth from the admin.
 2. Checks that `slash_amount <= bond.remaining`.
 3. Reduces `bond.remaining` by `slash_amount`.
-4. Distributes the slashed tokens back to the affected campaign's donors by adding `slash_amount` to `campaign.raised` and crediting the contract as the "donor", so the existing pro-rata refund formula automatically distributes the recovered funds to all contributors when they call `refund`.
+4. Credits `slash_amount` to the campaign's `SlashedRecovery` pool (`campaign.raised` is left untouched). `refund` pays each donor `contributed * (raised - released + slashed_recovery) / raised`, so slashed funds are distributed pro-rata to contributors and nothing is credited to the contract address.
 5. Emits `BondSlashed`.
 
 Preventing double-slash for the same dispute is enforced by tracking slashed amounts; the admin cannot slash more than `bond.remaining`.

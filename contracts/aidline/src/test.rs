@@ -1591,7 +1591,7 @@ fn a_bond_cannot_be_withdrawn_twice() {
 }
 
 #[test]
-fn slashing_moves_the_bond_into_the_campaign_for_donors() {
+fn slashing_moves_the_bond_into_the_recovery_pool_for_donors() {
     let s = Setup::new();
     let v = s.bonded_verifier(1_000, 400);
     let id = s.campaign();
@@ -1601,7 +1601,29 @@ fn slashing_moves_the_bond_into_the_campaign_for_donors() {
     let bond = s.client.get_verifier_bond(&v).unwrap();
     assert_eq!(bond.remaining, 250);
     assert_eq!(bond.status, BondStatus::Active);
-    assert_eq!(s.client.get_campaign(&id).raised, 150);
+    assert_eq!(s.client.get_campaign(&id).raised, 0);
+    assert_eq!(s.client.slashed_recovery(&id), 150);
+}
+
+#[test]
+fn slashed_bond_is_split_pro_rata_among_refunding_donors() {
+    let s = Setup::new();
+    let v = s.bonded_verifier(1_000, 400);
+    let id = s.campaign(); // Goal 1000
+    let donor_a = s.donor(600);
+    let donor_b = s.donor(400);
+    s.client.donate(&donor_a, &id, &600);
+    s.client.donate(&donor_b, &id, &400);
+    s.client.approve_milestone(&id, &s.proof()); // 300 released
+
+    s.client.slash_verifier(&v, &id, &200);
+    s.client.cancel_campaign(&s.creator, &id);
+
+    // Pool = (1000 - 300) + 200 = 900, split 60/40.
+    assert_eq!(s.client.refund(&donor_a, &id), 540);
+    assert_eq!(s.client.refund(&donor_b, &id), 360);
+    // Only the unslashed remainder of the bond is left in the contract.
+    assert_eq!(s.token.balance(&s.client.address), 200);
 }
 
 #[test]
@@ -1683,7 +1705,7 @@ fn slashing_completed_campaign_fails_and_does_not_deduct_bond() {
     s.client.slash_verifier(&v, &id_cancelled, &100);
     let bond_after = s.client.get_verifier_bond(&v).unwrap();
     assert_eq!(bond_after.remaining, 300);
-    assert_eq!(s.client.get_campaign(&id_cancelled).raised, 100);
+    assert_eq!(s.client.slashed_recovery(&id_cancelled), 100);
 }
 
 // ─── Sponsor matching pools (issue #27) ───────────────────────────────────────

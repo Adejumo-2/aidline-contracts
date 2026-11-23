@@ -176,4 +176,6 @@ pub enum DataKey {
     VerifierProfile(Address),
     // Paginated donors list
     CampaignDonors(u64),
+    // Slashed verifier bonds awaiting pro-rata refund to donors
+    SlashedRecovery(u64),
 }

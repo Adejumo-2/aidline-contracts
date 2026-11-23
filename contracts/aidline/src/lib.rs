@@ -508,7 +508,7 @@ impl Aidline {
     }
 
     /// Slashes `slash_amount` from `verifier`'s bond and credits it to
-    /// `campaign_id`'s raised total so it is distributed to donors on refund.
+    /// `campaign_id`'s slashed recovery pool so it is distributed to donors pro-rata on refund.
     ///
     /// Only the admin may call this. The slash amount must not exceed the
     /// verifier's remaining bond. Emits [`BondSlashed`].
@@ -542,7 +542,7 @@ impl Aidline {
             return Err(Error::SlashExceedsBond);
         }
 
-        let mut campaign = storage::campaign(&env, campaign_id)?;
+        let campaign = storage::campaign(&env, campaign_id)?;
         if campaign.status == CampaignStatus::Completed {
             return Err(Error::CampaignNotActive);
         }
@@ -553,14 +553,8 @@ impl Aidline {
         }
         storage::save_verifier_bond(&env, &bond);
 
-        let contract_addr = env.current_contract_address();
-        let prev = storage::contribution(&env, campaign_id, &contract_addr);
-        campaign.raised = campaign
-            .raised
-            .checked_add(slash_amount)
-            .unwrap_or(campaign.raised);
-        storage::save_campaign(&env, &campaign);
-        storage::set_contribution(&env, campaign_id, &contract_addr, prev + slash_amount);
+        let recovery = storage::slashed_recovery(&env, campaign_id);
+        storage::set_slashed_recovery(&env, campaign_id, recovery + slash_amount);
 
         BondSlashed {
             verifier: verifier.clone(),
@@ -1736,7 +1730,7 @@ impl Aidline {
     ///
     /// A refund is available when the campaign is cancelled, past its
     /// deadline, or a per-milestone due date has been missed. The refund
-    /// amount is `contribution * (raised - released) / raised`. After the
+    /// amount is `contribution * (raised - released + slashed_recovery) / raised`. After the
     /// transfer the donor's contribution record is zeroed. Emits [`Refunded`]
     /// and returns the amount transferred.
     ///
@@ -1789,8 +1783,9 @@ impl Aidline {
             return Err(Error::NothingToRefund);
         }
 
-        let unreleased = campaign.raised - campaign.released;
-        let amount = contributed * unreleased / campaign.raised;
+        let pool =
+            campaign.raised - campaign.released + storage::slashed_recovery(env, campaign_id);
+        let amount = contributed * pool / campaign.raised;
 
         storage::set_contribution(env, campaign_id, donor, 0);
         if amount > 0 {
@@ -2013,11 +2008,17 @@ impl Aidline {
         if contributed == 0 || campaign.raised == 0 {
             return 0;
         }
-        let unreleased = campaign.raised - campaign.released;
-        if unreleased <= 0 {
+        let pool =
+            campaign.raised - campaign.released + storage::slashed_recovery(&env, campaign_id);
+        if pool <= 0 {
             return 0;
         }
-        contributed * unreleased / campaign.raised
+        contributed * pool / campaign.raised
+    }
+
+    /// Returns the slashed verifier bond amount held for `campaign_id`'s donors.
+    pub fn slashed_recovery(env: Env, campaign_id: u64) -> i128 {
+        storage::slashed_recovery(&env, campaign_id)
     }
 
     /// Returns `true` if `who` is currently a registered verifier.
