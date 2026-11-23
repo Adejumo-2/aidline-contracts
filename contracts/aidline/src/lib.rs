@@ -46,6 +46,8 @@ const MAX_PLATFORM_FEE_BPS: u32 = 200;
 const SKIP_REASON_NO_ALLOWANCE: u32 = 1;
 /// Reason code emitted in PledgeSkipped when the pledge is fully consumed.
 const SKIP_REASON_EXHAUSTED: u32 = 2;
+/// Reason code: the pledging donor's wallet holds no tokens.
+const SKIP_REASON_INSUFFICIENT_BALANCE: u32 = 3;
 
 /// Maximum duration (in seconds) for a one-time deadline extension (30 days).
 const MAX_DEADLINE_EXTENSION: u64 = 30 * 86_400;
@@ -2203,8 +2205,21 @@ impl Aidline {
                 continue;
             }
 
+            // The allowance only authorises spending; the wallet may be empty.
+            let balance = tok.balance(&pledge.donor);
+            if balance <= 0 {
+                PledgeSkipped {
+                    pledge_id: pledge.pledge_id,
+                    campaign_id,
+                    donor: pledge.donor.clone(),
+                    reason: SKIP_REASON_INSUFFICIENT_BALANCE,
+                }
+                .publish(env);
+                continue;
+            }
+
             // Clamp to what is actually available.
-            let pull = share.min(pledge_remaining).min(allowance);
+            let pull = share.min(pledge_remaining).min(allowance).min(balance);
             if pull <= 0 {
                 PledgeSkipped {
                     pledge_id: pledge.pledge_id,
