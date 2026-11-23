@@ -1960,6 +1960,27 @@ fn pledge_pull_is_limited_to_the_wallet_balance() {
 }
 
 #[test]
+fn pledge_pulls_never_push_raised_past_the_goal() {
+    let s = Setup::new();
+    let id = s.campaign(); // Goal 1000
+    let pledger = s.donor(1_000);
+    let donor = s.donor(900);
+    let expiry = s.env.ledger().sequence() + 1_000;
+    s.token.approve(&pledger, &s.client.address, &300, &expiry);
+    let pledge_id = s.client.create_pledge(&pledger, &id, &300);
+
+    s.client.donate(&donor, &id, &900);
+    s.client.approve_milestone(&id, &s.proof()); // Milestone of 300
+
+    let campaign = s.client.get_campaign(&id);
+    assert_eq!(campaign.raised, 1_000);
+    assert!(campaign.raised <= campaign.goal);
+    // Only the 100 of headroom is pulled from the pledge.
+    assert_eq!(s.client.get_pledge(&pledge_id).unwrap().pulled_amount, 100);
+    assert_eq!(s.token.balance(&pledger), 900);
+}
+
+#[test]
 fn donor_can_cancel_pledge() {
     let s = Setup::new();
     let id = s.campaign();

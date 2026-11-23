@@ -2173,6 +2173,12 @@ impl Aidline {
         let mut total_pulled: i128 = 0;
 
         for mut pledge in active_pledges.iter() {
+            // Pulled pledges count towards `raised`, which must never pass the goal.
+            let headroom = campaign.goal.saturating_sub(campaign.raised);
+            if headroom <= 0 {
+                break;
+            }
+
             let pledge_remaining = pledge.pledged_amount - pledge.pulled_amount;
 
             // Proportional share: milestone_amount * pledge_remaining / total_remaining.
@@ -2219,7 +2225,11 @@ impl Aidline {
             }
 
             // Clamp to what is actually available.
-            let pull = share.min(pledge_remaining).min(allowance).min(balance);
+            let pull = share
+                .min(pledge_remaining)
+                .min(allowance)
+                .min(balance)
+                .min(headroom);
             if pull <= 0 {
                 PledgeSkipped {
                     pledge_id: pledge.pledge_id,
