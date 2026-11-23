@@ -85,4 +85,8 @@ pub enum Error {
     ActionNotFound = 43,
     TimelockNotReady = 44,
     ActionExpired = 45,
+
+    // Refund rollover
+    SameCampaign = 46,
+    TokenMismatch = 47,
 }

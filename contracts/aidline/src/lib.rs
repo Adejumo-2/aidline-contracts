@@ -1832,6 +1832,32 @@ impl Aidline {
     }
 
     fn execute_refund(env: &Env, donor: &Address, campaign_id: u64) -> Result<i128, Error> {
+        let (campaign, amount) = Self::take_refund(env, donor, campaign_id)?;
+
+        if amount > 0 {
+            token::Client::new(env, &campaign.token).transfer(
+                &env.current_contract_address(),
+                donor,
+                &amount,
+            );
+        }
+
+        Refunded {
+            campaign_id,
+            donor: donor.clone(),
+            amount,
+        }
+        .publish(env);
+        Ok(amount)
+    }
+
+    /// Checks refund eligibility, zeroes `donor`'s contribution and returns the
+    /// campaign with the refund amount, without moving any tokens.
+    fn take_refund(
+        env: &Env,
+        donor: &Address,
+        campaign_id: u64,
+    ) -> Result<(Campaign, i128), Error> {
         let mut campaign = storage::campaign(env, campaign_id)?;
 
         let expired = Self::is_expired(env, &campaign);
@@ -1858,20 +1884,83 @@ impl Aidline {
         let amount = contributed * unreleased / campaign.raised;
 
         storage::set_contribution(env, campaign_id, donor, 0);
-        if amount > 0 {
-            token::Client::new(env, &campaign.token).transfer(
-                &env.current_contract_address(),
-                donor,
-                &amount,
-            );
+        Ok((campaign, amount))
+    }
+
+    /// Rolls `donor`'s refund from `from_campaign` into `to_campaign` in one call.
+    ///
+    /// The amount is computed exactly like [`refund`] and then donated to the
+    /// target with the same limits as [`donate`], but the tokens never leave the
+    /// contract. Requires auth from `donor`. Emits [`Refunded`] for the source and
+    /// [`Donated`] for the target.
+    ///
+    /// Partial rollovers are not supported: if the refund is larger than the
+    /// target's remaining goal the call fails with [`Error::GoalExceeded`] and the
+    /// donor can claim a normal refund instead. A donor's contribution is zeroed
+    /// by the rollover, so it cannot be rolled over twice or refunded afterwards.
+    ///
+    /// # Errors
+    /// - [`Error::Paused`]: the contract is paused.
+    /// - [`Error::SameCampaign`]: `from_campaign == to_campaign`.
+    /// - [`Error::CampaignNotFound`]: either campaign does not exist.
+    /// - [`Error::CampaignNotActive`] / [`Error::CampaignExpired`] /
+    ///   [`Error::MilestoneOverdue`]: the target is not open.
+    /// - [`Error::RefundNotAvailable`] / [`Error::NothingToRefund`]: as for [`refund`].
+    /// - [`Error::TokenMismatch`]: the campaigns use different tokens.
+    /// - [`Error::InvalidAmount`]: the refund amount is zero.
+    /// - [`Error::GoalExceeded`]: the refund would pass the target's goal.
+    /// - [`Error::DonationBelowMinimum`]: the refund is below the target's minimum donation.
+    pub fn rollover_refund(
+        env: Env,
+        donor: Address,
+        from_campaign: u64,
+        to_campaign: u64,
+    ) -> Result<i128, Error> {
+        donor.require_auth();
+        if storage::is_paused(&env) {
+            return Err(Error::Paused);
+        }
+        if from_campaign == to_campaign {
+            return Err(Error::SameCampaign);
         }
 
+        let mut target = storage::campaign(&env, to_campaign)?;
+        Self::ensure_open(&env, &target)?;
+
+        let (source, amount) = Self::take_refund(&env, &donor, from_campaign)?;
+        if source.token != target.token {
+            return Err(Error::TokenMismatch);
+        }
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let remaining = target.goal - target.raised;
+        if amount > remaining {
+            return Err(Error::GoalExceeded);
+        }
+        if target.min_donation > 0 && amount < target.min_donation && amount < remaining {
+            return Err(Error::DonationBelowMinimum);
+        }
+
+        target.raised += amount;
+        storage::save_campaign(&env, &target);
+        let previous = storage::contribution(&env, to_campaign, &donor);
+        storage::set_contribution(&env, to_campaign, &donor, previous + amount);
+        storage::add_campaign_donor(&env, to_campaign, &donor);
+
         Refunded {
-            campaign_id,
+            campaign_id: from_campaign,
             donor: donor.clone(),
             amount,
         }
-        .publish(env);
+        .publish(&env);
+        Donated {
+            campaign_id: to_campaign,
+            donor,
+            amount,
+        }
+        .publish(&env);
         Ok(amount)
     }
 

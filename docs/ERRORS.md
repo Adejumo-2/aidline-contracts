@@ -48,3 +48,5 @@ Integrators and client applications encountering numeric error codes (e.g. `#12`
 | **43** | `ActionNotFound` | `cancel_action`, `execute_action` | No queued action exists with that id. It may have been executed or cancelled already. |
 | **44** | `TimelockNotReady` | `execute_action` | Wait until the action's `eta` (queue time plus `TIMELOCK_DELAY`) has passed. |
 | **45** | `ActionExpired` | `execute_action` | The grace period (`TIMELOCK_GRACE_PERIOD`) after `eta` has passed. Cancel the action and queue it again. |
+| **46** | `SameCampaign` | `rollover_refund` | Pick a target campaign different from the one being refunded. |
+| **47** | `TokenMismatch` | `rollover_refund` | Both campaigns must use the same token. Claim a normal `refund` instead. |
