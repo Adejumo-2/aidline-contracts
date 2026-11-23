@@ -1683,6 +1683,21 @@ fn slash_validates_its_arguments() {
 }
 
 #[test]
+fn slash_with_unknown_campaign_fails_and_leaves_bond_untouched() {
+    let s = Setup::new();
+    let v = s.bonded_verifier(1_000, 400);
+
+    assert_eq!(
+        s.client.try_slash_verifier(&v, &9_999, &150),
+        Err(Ok(Error::CampaignNotFound))
+    );
+
+    let bond = s.client.get_verifier_bond(&v).unwrap();
+    assert_eq!(bond.remaining, 400);
+    assert_eq!(bond.status, BondStatus::Active);
+}
+
+#[test]
 fn a_withdrawn_bond_cannot_be_slashed() {
     let s = Setup::new();
     let v = s.bonded_verifier(1_000, 400);
