@@ -1550,6 +1550,29 @@ fn an_active_bond_cannot_be_withdrawn() {
 }
 
 #[test]
+fn admin_removal_moves_bond_to_pending_withdrawal() {
+    let s = Setup::new();
+    s.client.set_bond_withdraw_delay(&(7 * DAY));
+    let v = s.bonded_verifier(1_000, 100);
+
+    s.client.remove_verifier(&v);
+
+    assert!(!s.client.is_verifier(&v));
+    let bond = s.client.get_verifier_bond(&v).unwrap();
+    assert_eq!(bond.status, BondStatus::PendingWithdrawal);
+    assert_eq!(bond.deregistered_at, s.env.ledger().timestamp());
+    assert_eq!(
+        s.client.try_withdraw_bond(&v),
+        Err(Ok(Error::WithdrawDelayNotMet))
+    );
+
+    let now = s.env.ledger().timestamp();
+    s.env.ledger().set_timestamp(now + 7 * DAY);
+    assert_eq!(s.client.withdraw_bond(&v), 100);
+    assert_eq!(s.token.balance(&v), 1_000);
+}
+
+#[test]
 fn bond_withdrawal_waits_for_the_delay() {
     let s = Setup::new();
     s.client.set_bond_withdraw_delay(&(7 * DAY));

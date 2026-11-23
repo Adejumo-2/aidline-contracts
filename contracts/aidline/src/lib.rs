@@ -106,12 +106,31 @@ impl Aidline {
     /// the verifier will freeze until the campaign is cancelled or reassigned
     /// via [`reassign_verifier`]. Emits [`VerifierUpdated`] with `active = false`.
     ///
+    /// If the verifier has an active bond it moves to `PendingWithdrawal` (as in
+    /// [`deregister_verifier`]) and [`VerifierDeregistered`] is emitted, so the
+    /// bond can always be withdrawn after the delay.
+    ///
     /// # Errors
     /// - [`Error::Unauthorized`]: caller is not the admin (enforced via
     ///   `require_auth` on the stored admin address).
     pub fn remove_verifier(env: Env, verifier: Address) {
         storage::admin(&env).require_auth();
         storage::set_verifier(&env, &verifier, false);
+
+        if let Some(mut bond) = storage::verifier_bond(&env, &verifier)
+            && bond.status == BondStatus::Active
+        {
+            let now = env.ledger().timestamp();
+            bond.status = BondStatus::PendingWithdrawal;
+            bond.deregistered_at = now;
+            storage::save_verifier_bond(&env, &bond);
+            VerifierDeregistered {
+                verifier: verifier.clone(),
+                deregistered_at: now,
+            }
+            .publish(&env);
+        }
+
         VerifierUpdated {
             verifier,
             active: false,
