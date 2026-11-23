@@ -927,6 +927,57 @@ impl Aidline {
         Ok(id)
     }
 
+    /// Creates a campaign with optional stretch milestones and returns its ID.
+    ///
+    /// The stretch milestones are appended after the base `milestones` and the
+    /// campaign's `goal` is the sum of both, so donations are accepted past the
+    /// base goal only up to the stretch total. Stretch milestones are approved
+    /// in order like any other milestone. Campaigns that do not reach the
+    /// stretch refund pro rata as usual. With an empty `stretch_milestones`
+    /// this behaves exactly like [`create_campaign`].
+    ///
+    /// # Errors
+    /// Same as [`create_campaign`]. The combined milestone list must not exceed
+    /// [`MAX_MILESTONES`].
+    pub fn create_campaign_with_stretch(
+        env: Env,
+        creator: Address,
+        beneficiary: Address,
+        verifier: Address,
+        token: Address,
+        kind: CampaignKind,
+        metadata_uri: String,
+        deadline: u64,
+        milestones: Vec<i128>,
+        stretch_milestones: Vec<i128>,
+    ) -> Result<u64, Error> {
+        let mut all_milestones = milestones;
+        for amount in stretch_milestones.iter() {
+            all_milestones.push_back(amount);
+        }
+
+        let id = Self::create_campaign(
+            env.clone(),
+            creator,
+            beneficiary,
+            verifier,
+            token,
+            kind,
+            metadata_uri,
+            deadline,
+            all_milestones,
+        )?;
+        if !stretch_milestones.is_empty() {
+            storage::set_stretch_count(&env, id, stretch_milestones.len());
+        }
+        Ok(id)
+    }
+
+    /// Returns how many of `campaign_id`'s trailing milestones are stretch milestones.
+    pub fn stretch_milestone_count(env: Env, campaign_id: u64) -> u32 {
+        storage::stretch_count(&env, campaign_id)
+    }
+
     /// Updates the off-chain metadata URI for `campaign_id`.
     ///
     /// Only the campaign's creator may call this, and only before any

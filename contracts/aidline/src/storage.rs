@@ -141,6 +141,17 @@ pub fn set_contribution(env: &Env, id: u64, donor: &Address, amount: i128) {
     }
 }
 
+pub fn stretch_count(env: &Env, id: u64) -> u32 {
+    let key = DataKey::StretchCount(id);
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+pub fn set_stretch_count(env: &Env, id: u64, count: u32) {
+    let key = DataKey::StretchCount(id);
+    env.storage().persistent().set(&key, &count);
+    bump(env, &key);
+}
+
 pub fn next_action_id(env: &Env) -> u64 {
     let id: u64 = env
         .storage()

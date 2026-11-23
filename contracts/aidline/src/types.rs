@@ -202,4 +202,6 @@ pub enum DataKey {
     // Issue #113: timelock queue
     NextActionId,
     QueuedAction(u64),
+    // Issue #120: number of stretch milestones at the end of a campaign's milestone list
+    StretchCount(u64),
 }
