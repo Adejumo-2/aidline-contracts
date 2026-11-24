@@ -1602,6 +1602,34 @@ fn bond_withdrawal_waits_for_the_delay() {
 }
 
 #[test]
+fn bond_withdrawal_delay_saturates_when_timestamp_is_less_than_deregistered_at() {
+    let s = Setup::new();
+    s.client.set_bond_withdraw_delay(&(7 * DAY));
+    let v = s.bonded_verifier(1_000, 100);
+
+    let dereg_time = 100_000;
+    s.env.ledger().set_timestamp(dereg_time);
+    s.client.deregister_verifier(&v, &v);
+
+    // Ledger timestamp equals deregistered_at: elapsed is 0, delay not met
+    assert_eq!(
+        s.client.try_withdraw_bond(&v),
+        Err(Ok(Error::WithdrawDelayNotMet))
+    );
+
+    // Ledger timestamp goes backward: saturating subtraction evaluates to 0 without underflow panic
+    s.env.ledger().set_timestamp(dereg_time - 100);
+    assert_eq!(
+        s.client.try_withdraw_bond(&v),
+        Err(Ok(Error::WithdrawDelayNotMet))
+    );
+
+    // When time advances past delay: succeeds
+    s.env.ledger().set_timestamp(dereg_time + 7 * DAY);
+    assert_eq!(s.client.withdraw_bond(&v), 100);
+}
+
+#[test]
 fn a_bond_cannot_be_withdrawn_twice() {
     let s = Setup::new();
     let v = s.bonded_verifier(1_000, 100);
