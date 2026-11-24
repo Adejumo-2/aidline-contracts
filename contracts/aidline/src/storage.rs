@@ -43,6 +43,19 @@ pub fn remove_pending_admin(env: &Env) {
     env.storage().instance().remove(&DataKey::PendingAdmin);
 }
 
+/// The address that may slash verifier bonds. Defaults to the current admin,
+/// so a deployment that never calls `set_slasher` behaves as before.
+pub fn slasher(env: &Env) -> Address {
+    env.storage()
+        .instance()
+        .get(&DataKey::Slasher)
+        .unwrap_or_else(|| admin(env))
+}
+
+pub fn set_slasher(env: &Env, slasher: &Address) {
+    env.storage().instance().set(&DataKey::Slasher, slasher);
+}
+
 pub fn token(env: &Env) -> Address {
     env.storage().instance().get(&DataKey::Token).unwrap()
 }

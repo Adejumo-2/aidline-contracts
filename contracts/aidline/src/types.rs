@@ -176,4 +176,6 @@ pub enum DataKey {
     VerifierProfile(Address),
     // Paginated donors list
     CampaignDonors(u64),
+    // Issue #111: address allowed to slash verifier bonds (instance storage)
+    Slasher,
 }

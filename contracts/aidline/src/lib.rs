@@ -25,7 +25,7 @@ pub use types::{
 };
 
 use events::{
-    AdminAccepted, AdminChanged, AdminProposed, BondSlashed, BondWithdrawn, CampaignCancelled,
+    AdminAccepted, AdminChanged, AdminProposed, BondSlashed, SlasherChanged, BondWithdrawn, CampaignCancelled,
     CampaignCancelledWithReason, CampaignCreated, ContractPaused, ContractUnpaused,
     ContractUpgraded, DeadlineExtended, Donated, EmergencyAdvanceReleased, MatchingApplied,
     MetadataUpdated, MilestoneApproved, MilestoneRejected, MilestoneReleased, PlatformFeeUpdated,
@@ -510,11 +510,12 @@ impl Aidline {
     /// Slashes `slash_amount` from `verifier`'s bond and credits it to
     /// `campaign_id`'s raised total so it is distributed to donors on refund.
     ///
-    /// Only the admin may call this. The slash amount must not exceed the
-    /// verifier's remaining bond. Emits [`BondSlashed`].
+    /// Only the slasher may call this (the admin unless [`set_slasher`] named
+    /// someone else). The slash amount must not exceed the verifier's remaining
+    /// bond. Emits [`BondSlashed`].
     ///
     /// # Errors
-    /// - [`Error::Unauthorized`]: caller is not the admin.
+    /// - [`Error::Unauthorized`]: caller is not the slasher.
     /// - [`Error::InvalidAmount`]: `slash_amount` is zero or negative.
     /// - [`Error::BondNotFound`]: no bond record exists for `verifier`.
     /// - [`Error::BondNotWithdrawable`]: bond has already been withdrawn.
@@ -527,7 +528,7 @@ impl Aidline {
         campaign_id: u64,
         slash_amount: i128,
     ) -> Result<(), Error> {
-        storage::admin(&env).require_auth();
+        storage::slasher(&env).require_auth();
 
         if slash_amount <= 0 {
             return Err(Error::InvalidAmount);
@@ -570,6 +571,28 @@ impl Aidline {
         .publish(&env);
 
         Ok(())
+    }
+
+    /// Names the address that may slash verifier bonds, for example a multisig
+    /// account separate from the admin key.
+    ///
+    /// Only the admin may call this. Until it is called the slasher is the
+    /// admin. Once another address is set the admin can no longer slash unless
+    /// they set themselves again. Emits [`SlasherChanged`].
+    ///
+    /// # Errors
+    /// - [`Error::Unauthorized`]: caller is not the admin.
+    pub fn set_slasher(env: Env, slasher: Address) {
+        storage::admin(&env).require_auth();
+        let old = storage::slasher(&env);
+        storage::set_slasher(&env, &slasher);
+        storage::bump_instance(&env);
+        SlasherChanged { old, new: slasher }.publish(&env);
+    }
+
+    /// Returns the address that may slash verifier bonds.
+    pub fn get_slasher(env: Env) -> Address {
+        storage::slasher(&env)
     }
 
     // ─── Bond views ───────────────────────────────────────────────────────────

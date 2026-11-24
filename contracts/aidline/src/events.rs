@@ -460,6 +460,21 @@ impl EmergencyAdvanceReleased {
     }
 }
 
+// ─── Issue #111: slasher role ────────────────────────────────────────────────
+
+/// Emitted when the admin changes who may slash verifier bonds.
+pub struct SlasherChanged {
+    pub old: Address,
+    pub new: Address,
+}
+
+impl SlasherChanged {
+    pub fn publish(&self, env: &Env) {
+        env.events()
+            .publish((symbol_short!("slasher"),), (self.old.clone(), self.new.clone()));
+    }
+}
+
 // ─── Issue #9: Multisig milestone approved event ───────────────────────────
 
 /// Emitted when a verifier records their approval for a milestone.
