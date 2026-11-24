@@ -323,3 +323,45 @@ fn expired_campaign_allows_refund_and_blocks_activity() {
     assert_eq!(s.client.refund(&donor, &id), 500);
     assert_eq!(s.token.balance(&donor), 1000);
 }
+
+#[test]
+fn refund_pro_rata_overflow_returns_invalid_amount() {
+    let s = Setup::new();
+    let half_max = i128::MAX / 2;
+    let milestones = vec![&s.env, half_max, half_max];
+    let id = s.client.create_campaign(
+        &s.creator,
+        &s.beneficiary,
+        &s.verifier,
+        &s.token.address,
+        &CampaignKind::Emergency,
+        &String::from_str(&s.env, "ipfs://overflow-refund"),
+        &(s.env.ledger().timestamp() + 30 * DAY),
+        &milestones,
+    );
+
+    let donor1 = s.donor(half_max);
+    let donor2 = s.donor(1);
+
+    s.client.donate(&donor1, &id, &half_max);
+    s.client.donate(&donor2, &id, &1);
+
+    s.client.cancel_campaign(&s.creator, &id);
+
+    // donor1: contributed = half_max, unreleased = half_max + 1.
+    // contributed * unreleased overflows i128::MAX -> returns Err(Ok(Error::InvalidAmount))
+    assert_eq!(
+        s.client.try_refund(&donor1, &id),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert_eq!(
+        s.client.try_refund_for(&donor1, &id),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert_eq!(s.client.refundable_amount(&id, &donor1), 0);
+
+    // donor2: contributed = 1, unreleased = half_max + 1.
+    // 1 * (half_max + 1) does not overflow -> succeeds
+    let refunded2 = s.client.refund(&donor2, &id);
+    assert_eq!(refunded2, 1);
+}

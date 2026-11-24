@@ -361,3 +361,13 @@ Emitted when a queued action is executed after its delay.
 - **Topics**: `(symbol_short!("tl_exec"), action_id: u64)`
 - **Data**: `()`
 - **Emitted by**: `execute_action`
+### 34. `BeneficiaryPaid`
+Emitted once per recipient when a split-payout campaign pays out a milestone or the emergency advance (#116).
+- **Fields in code**:
+  1. `campaign_id: u64`
+  2. `recipient: Address`
+  3. `amount: i128`
+- **Topics**: `(symbol_short!("paid"), campaign_id: u64, recipient: Address)`
+- **Data**: `amount: i128`
+- **Emitted by**: `approve_milestone`, `approve_milestone_multisig`, `emergency_fast_track` (split-payout campaigns only)
+

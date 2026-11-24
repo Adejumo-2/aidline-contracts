@@ -89,4 +89,9 @@ pub enum Error {
     // Refund rollover
     SameCampaign = 46,
     TokenMismatch = 47,
+    // Split payouts
+    InvalidBeneficiaries = 48,
+
+    // Storage schema versioning
+    MigrationPending = 49,
 }

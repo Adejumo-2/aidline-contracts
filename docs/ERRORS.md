@@ -50,3 +50,4 @@ Integrators and client applications encountering numeric error codes (e.g. `#12`
 | **45** | `ActionExpired` | `execute_action` | The grace period (`TIMELOCK_GRACE_PERIOD`) after `eta` has passed. Cancel the action and queue it again. |
 | **46** | `SameCampaign` | `rollover_refund` | Pick a target campaign different from the one being refunded. |
 | **47** | `TokenMismatch` | `rollover_refund` | Both campaigns must use the same token. Claim a normal `refund` instead. |
+| **48** | `InvalidBeneficiaries` | `create_campaign_with_beneficiaries` | Provide 1 to 10 beneficiaries with positive shares in basis points that sum to exactly 10,000 and distinct addresses. |

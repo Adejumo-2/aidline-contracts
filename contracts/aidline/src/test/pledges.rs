@@ -228,3 +228,57 @@ fn extend_campaign_ttl_validates_existence_and_requires_no_auth() {
     // Any caller can extend TTL without specific authorization
     assert_eq!(s.client.try_extend_campaign_ttl(&id), Ok(Ok(())));
 }
+
+#[test]
+fn pledge_pull_overflow_skips_pledge_safely() {
+    let s = Setup::new();
+    let milestone_val = i128::MAX / 10;
+    let milestones = vec![&s.env, milestone_val];
+    let id = s.client.create_campaign(
+        &s.creator,
+        &s.beneficiary,
+        &s.verifier,
+        &s.token.address,
+        &CampaignKind::Emergency,
+        &String::from_str(&s.env, "ipfs://overflow-pledge"),
+        &(s.env.ledger().timestamp() + 30 * DAY),
+        &milestones,
+    );
+
+    let donor_overflow = s.donor(i128::MAX / 2);
+    let donor_normal = s.donor(1_000);
+    let donor_direct = s.donor(milestone_val);
+    let expiry = s.env.ledger().sequence() + 1_000;
+
+    let pledge_large = i128::MAX / 2;
+    s.token
+        .approve(&donor_overflow, &s.client.address, &pledge_large, &expiry);
+    s.token
+        .approve(&donor_normal, &s.client.address, &5, &expiry);
+
+    let pid_overflow = s.client.create_pledge(&donor_overflow, &id, &pledge_large);
+    let pid_normal = s.client.create_pledge(&donor_normal, &id, &5);
+
+    // Direct donation covers milestone so that approval can succeed even if pledges are skipped
+    s.client.donate(&donor_direct, &id, &milestone_val);
+
+    // Initial balances
+    assert_eq!(s.token.balance(&donor_overflow), pledge_large);
+    assert_eq!(s.token.balance(&donor_normal), 1_000);
+
+    // Approve milestone: milestone_val * pledge_large overflows i128::MAX.
+    // Instead of falling back to i128::MAX and draining donor_overflow,
+    // it skips donor_overflow safely.
+    s.client.approve_milestone(&id, &s.proof());
+
+    // donor_overflow was safely skipped - balance untouched and pulled_amount is 0
+    assert_eq!(s.token.balance(&donor_overflow), pledge_large);
+    assert_eq!(s.client.get_pledge(&pid_overflow).unwrap().pulled_amount, 0);
+
+    // donor_normal (5 tokens) does not overflow and was processed
+    let pledge_normal = s.client.get_pledge(&pid_normal).unwrap();
+    assert_eq!(
+        s.token.balance(&donor_normal),
+        1_000 - pledge_normal.pulled_amount
+    );
+}

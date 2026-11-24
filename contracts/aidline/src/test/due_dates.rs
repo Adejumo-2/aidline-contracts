@@ -177,3 +177,63 @@ fn overdue_milestone_blocks_new_donations_sponsor_pools_and_pledges() {
     let refunded = s.client.refund(&donor_a, &id);
     assert_eq!(refunded, 200);
 }
+
+#[test]
+fn create_campaign_with_due_dates_rejects_due_dates_exceeding_deadline() {
+    let s = Setup::new();
+    let now = s.env.ledger().timestamp();
+    let milestones = vec![&s.env, 300, 700];
+
+    let count_before = s.client.campaign_count();
+
+    // 1. Due date exceeding deadline (deadline = now + 10 * DAY, due_date = now + 15 * DAY) fails
+    let late_dates = vec![&s.env, now + 5 * DAY, now + 15 * DAY];
+    assert_eq!(
+        s.client.try_create_campaign_with_due_dates(
+            &s.creator,
+            &s.beneficiary,
+            &s.verifier,
+            &s.token.address,
+            &CampaignKind::Emergency,
+            &String::from_str(&s.env, "ipfs://late-due"),
+            &(now + 10 * DAY),
+            &milestones,
+            &late_dates,
+        ),
+        Err(Ok(Error::InvalidMilestones))
+    );
+
+    // 2. Due date = deadline + 1 fails
+    let deadline = now + 10 * DAY;
+    let over_by_one = vec![&s.env, now + 5 * DAY, deadline + 1];
+    assert_eq!(
+        s.client.try_create_campaign_with_due_dates(
+            &s.creator,
+            &s.beneficiary,
+            &s.verifier,
+            &s.token.address,
+            &CampaignKind::Emergency,
+            &String::from_str(&s.env, "ipfs://over-by-one"),
+            &deadline,
+            &milestones,
+            &over_by_one,
+        ),
+        Err(Ok(Error::InvalidMilestones))
+    );
+
+    // 3. Due date equal to deadline succeeds
+    let exact_deadline_dates = vec![&s.env, now + 5 * DAY, deadline];
+    let res = s.client.create_campaign_with_due_dates(
+        &s.creator,
+        &s.beneficiary,
+        &s.verifier,
+        &s.token.address,
+        &CampaignKind::Emergency,
+        &String::from_str(&s.env, "ipfs://exact-deadline-due"),
+        &deadline,
+        &milestones,
+        &exact_deadline_dates,
+    );
+    assert_eq!(s.client.campaign_count(), count_before + 1);
+    assert_eq!(s.client.milestone_due_dates(&res), exact_deadline_dates);
+}
