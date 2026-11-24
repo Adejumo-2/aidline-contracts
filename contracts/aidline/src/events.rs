@@ -492,7 +492,11 @@ pub struct CancelVoteWithdrawn {
 impl CancelVoteWithdrawn {
     pub fn publish(&self, env: &Env) {
         env.events().publish(
-            (symbol_short!("cvote_wd"), self.campaign_id, self.donor.clone()),
+            (
+                symbol_short!("cvote_wd"),
+                self.campaign_id,
+                self.donor.clone(),
+            ),
             (self.weight, self.total),
         );
     }

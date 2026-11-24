@@ -27,14 +27,13 @@ pub use types::{
 
 use events::{
     AdminAccepted, AdminChanged, AdminProposed, BeneficiaryPaid, BondSlashed, BondWithdrawn,
-    CampaignCancelled, CancelVoteWithdrawn, CancelVoted, Migrated, StreamClaimed,
-    CampaignCancelledWithReason, CampaignCreated, ContractPaused, ContractUnpaused,
-    ContractUpgraded, DeadlineExtended, Donated, EmergencyAdvanceReleased, MatchingApplied,
-    MetadataUpdated, MilestoneApproved, MilestoneRejected, MilestoneReleased, PlatformFeeUpdated,
-    PledgeCancelled, PledgeCreated, PledgePulled, PledgeSettlement, PledgeSkipped, Refunded,
-    SponsorPoolDeposited, SponsorPoolReturned, TokenAllowlistUpdated, TreasuryUpdated,
-    VerifierBondPosted, VerifierDeregistered, VerifierProfileUpdated, VerifierReassigned,
-    VerifierUpdated,
+    CampaignCancelled, CampaignCancelledWithReason, CampaignCreated, CancelVoteWithdrawn,
+    CancelVoted, ContractPaused, ContractUnpaused, ContractUpgraded, DeadlineExtended, Donated,
+    EmergencyAdvanceReleased, MatchingApplied, MetadataUpdated, Migrated, MilestoneApproved,
+    MilestoneRejected, MilestoneReleased, PlatformFeeUpdated, PledgeCancelled, PledgeCreated,
+    PledgePulled, PledgeSettlement, PledgeSkipped, Refunded, SponsorPoolDeposited,
+    SponsorPoolReturned, StreamClaimed, TokenAllowlistUpdated, TreasuryUpdated, VerifierBondPosted,
+    VerifierDeregistered, VerifierProfileUpdated, VerifierReassigned, VerifierUpdated,
 };
 
 const MAX_MILESTONES: u32 = 20;
@@ -328,6 +327,7 @@ impl Aidline {
         let mut version = from;
         while version < SCHEMA_VERSION {
             // Each arm upgrades the stored data from `version` to `version + 1`.
+            #[allow(clippy::single_match)]
             match version {
                 // 0 -> 1: the layout is unchanged; this step only marks the
                 // existing data as versioned.
@@ -465,6 +465,17 @@ impl Aidline {
 
         if storage::is_verifier(&env, &verifier) {
             return Err(Error::Unauthorized);
+        }
+
+        if let Some(existing_bond) = storage::verifier_bond(&env, &verifier) {
+            match existing_bond.status {
+                BondStatus::Active | BondStatus::PendingWithdrawal => {
+                    return Err(Error::Unauthorized);
+                }
+                BondStatus::Withdrawn | BondStatus::Slashed => {
+                    storage::archive_verifier_bond(&env, &verifier, &existing_bond);
+                }
+            }
         }
 
         token::Client::new(&env, &storage::token(&env)).transfer(
@@ -655,6 +666,20 @@ impl Aidline {
     /// bond has ever been posted.
     pub fn get_verifier_bond(env: Env, verifier: Address) -> Option<VerifierBond> {
         storage::verifier_bond(&env, &verifier)
+    }
+
+    /// Returns the historical [`VerifierBond`] record for `verifier` at `nonce`.
+    pub fn get_historical_verifier_bond(
+        env: Env,
+        verifier: Address,
+        nonce: u32,
+    ) -> Option<VerifierBond> {
+        storage::historical_verifier_bond(&env, &verifier, nonce)
+    }
+
+    /// Returns the number of archived bond cycles for `verifier`.
+    pub fn get_verifier_bond_nonce(env: Env, verifier: Address) -> u32 {
+        storage::verifier_bond_nonce(&env, &verifier)
     }
 
     /// Returns the current required bond amount. `0` means no bond is required.
@@ -1014,7 +1039,7 @@ impl Aidline {
     ///   [`MAX_BENEFICIARIES`], has a zero share, repeats an address, or its
     ///   shares do not sum to 10,000.
     /// - [`Error::ConflictOfInterest`]: the verifier is one of the beneficiaries.
-    pub fn create_campaign_with_beneficiaries(
+    pub fn create_campaign_beneficiaries(
         env: Env,
         creator: Address,
         beneficiaries: Vec<Beneficiary>,
@@ -1074,14 +1099,16 @@ impl Aidline {
     /// - [`Error::CampaignNotFound`]: no campaign with `campaign_id` exists.
     pub fn get_beneficiaries(env: Env, campaign_id: u64) -> Result<Vec<Beneficiary>, Error> {
         let campaign = storage::campaign(&env, campaign_id)?;
-        Ok(storage::beneficiaries(&env, campaign_id).unwrap_or_else(|| {
-            let mut single = Vec::new(&env);
-            single.push_back(Beneficiary {
-                to: campaign.beneficiary,
-                bps: MAX_RATIO_BPS,
-            });
-            single
-        }))
+        Ok(
+            storage::beneficiaries(&env, campaign_id).unwrap_or_else(|| {
+                let mut single = Vec::new(&env);
+                single.push_back(Beneficiary {
+                    to: campaign.beneficiary,
+                    bps: MAX_RATIO_BPS,
+                });
+                single
+            }),
+        )
     }
 
     /// Updates the off-chain metadata URI for `campaign_id`.
@@ -2420,10 +2447,15 @@ impl Aidline {
         if pool <= 0 {
             return 0;
         }
-        let Some(numerator) = contributed.checked_mul(unreleased) else {
+        let Some(numerator) = contributed.checked_mul(pool) else {
             return 0;
         };
         numerator / campaign.raised
+    }
+
+    /// Returns the slashed verifier bond amount held for `campaign_id`'s donors.
+    pub fn slashed_recovery(env: Env, campaign_id: u64) -> i128 {
+        storage::slashed_recovery(&env, campaign_id)
     }
 
     /// Returns `true` if `who` is currently a registered verifier.

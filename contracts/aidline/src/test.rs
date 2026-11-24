@@ -1614,6 +1614,58 @@ fn a_bond_cannot_be_withdrawn_twice() {
 }
 
 #[test]
+fn verifier_reregistration_preserves_historical_bond_record() {
+    let s = Setup::new();
+    let v = s.bonded_verifier(2_000, 500);
+
+    // Initial bond is active
+    let bond0 = s.client.get_verifier_bond(&v).unwrap();
+    assert_eq!(bond0.amount, 500);
+    assert_eq!(bond0.status, BondStatus::Active);
+
+    // Cannot re-register while active
+    assert_eq!(
+        s.client.try_register_with_bond(&v, &600),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    // Deregister
+    s.client.deregister_verifier(&v, &v);
+    let bond_pending = s.client.get_verifier_bond(&v).unwrap();
+    assert_eq!(bond_pending.status, BondStatus::PendingWithdrawal);
+
+    // Cannot re-register while pending withdrawal
+    assert_eq!(
+        s.client.try_register_with_bond(&v, &600),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    // Withdraw bond
+    let withdrawn = s.client.withdraw_bond(&v);
+    assert_eq!(withdrawn, 500);
+    let bond_withdrawn = s.client.get_verifier_bond(&v).unwrap();
+    assert_eq!(bond_withdrawn.status, BondStatus::Withdrawn);
+    assert_eq!(s.client.get_verifier_bond_nonce(&v), 0);
+
+    // Re-register with new bond amount 600
+    s.client.register_with_bond(&v, &600);
+
+    // Archived prior bond preserved
+    assert_eq!(s.client.get_verifier_bond_nonce(&v), 1);
+    let historical = s.client.get_historical_verifier_bond(&v, &0).unwrap();
+    assert_eq!(historical.amount, 500);
+    assert_eq!(historical.remaining, 0);
+    assert_eq!(historical.status, BondStatus::Withdrawn);
+
+    // New active bond is in place
+    let bond1 = s.client.get_verifier_bond(&v).unwrap();
+    assert_eq!(bond1.amount, 600);
+    assert_eq!(bond1.remaining, 600);
+    assert_eq!(bond1.status, BondStatus::Active);
+    assert!(s.client.is_verifier(&v));
+}
+
+#[test]
 fn slashing_moves_the_bond_into_the_recovery_pool_for_donors() {
     let s = Setup::new();
     let v = s.bonded_verifier(1_000, 400);
@@ -5401,7 +5453,6 @@ fn create_campaign_with_due_dates_rejects_due_dates_exceeding_deadline() {
     assert_eq!(s.client.milestone_due_dates(&res), exact_deadline_dates);
 }
 
-
 // ─── Issue #110: persistent keys are extended ────────────────────────────────
 
 mod ttl {
@@ -5413,8 +5464,9 @@ mod ttl {
     /// Remaining TTL, in ledgers, of a persistent key. Read through the test
     /// environment; it panics if the key does not exist.
     fn ttl(s: &Setup, key: &DataKey) -> u32 {
-        s.env
-            .as_contract(&s.client.address, || s.env.storage().persistent().get_ttl(key))
+        s.env.as_contract(&s.client.address, || {
+            s.env.storage().persistent().get_ttl(key)
+        })
     }
 
     fn assert_extended(s: &Setup, key: DataKey) {
@@ -5445,7 +5497,8 @@ mod ttl {
         assert_extended(&s, DataKey::CampaignDonors(id));
 
         let sponsor = s.donor(1_000);
-        s.client.deposit_sponsor_pool(&sponsor, &id, &5_000, &500, &500);
+        s.client
+            .deposit_sponsor_pool(&sponsor, &id, &5_000, &500, &500);
         assert_extended(&s, DataKey::SponsorPool(id, sponsor.clone()));
 
         let pledger = s.donor(500);
@@ -5534,7 +5587,10 @@ mod ttl {
         let after = s
             .env
             .as_contract(&s.client.address, || s.env.storage().instance().get_ttl());
-        assert!(after >= INSTANCE_THRESHOLD, "instance left with {after} ledgers");
+        assert!(
+            after >= INSTANCE_THRESHOLD,
+            "instance left with {after} ledgers"
+        );
     }
 }
 
@@ -5552,7 +5608,7 @@ mod split_payouts {
                 bps: *bps,
             });
         }
-        s.client.create_campaign_with_beneficiaries(
+        s.client.create_campaign_beneficiaries(
             &s.creator,
             &list,
             &s.verifier,
@@ -5572,7 +5628,10 @@ mod split_payouts {
             Address::generate(&s.env),
             Address::generate(&s.env),
         );
-        let id = split_campaign(&s, &[(a.clone(), 3_333), (b.clone(), 3_333), (c.clone(), 3_334)]);
+        let id = split_campaign(
+            &s,
+            &[(a.clone(), 3_333), (b.clone(), 3_333), (c.clone(), 3_334)],
+        );
         let donor = s.donor(1_000);
         s.client.donate(&donor, &id, &1_000);
 
@@ -5598,7 +5657,10 @@ mod split_payouts {
             Address::generate(&s.env),
             Address::generate(&s.env),
         );
-        let id = split_campaign(&s, &[(a.clone(), 3_333), (b.clone(), 3_333), (c.clone(), 3_334)]);
+        let id = split_campaign(
+            &s,
+            &[(a.clone(), 3_333), (b.clone(), 3_333), (c.clone(), 3_334)],
+        );
         let donor = s.donor(500);
         s.client.donate(&donor, &id, &300);
 
@@ -5621,7 +5683,7 @@ mod split_payouts {
                     bps: *bps,
                 });
             }
-            s.client.try_create_campaign_with_beneficiaries(
+            s.client.try_create_campaign_beneficiaries(
                 &s.creator,
                 &list,
                 &s.verifier,
@@ -5666,7 +5728,7 @@ mod split_payouts {
             bps: 5_000,
         });
         assert_eq!(
-            s.client.try_create_campaign_with_beneficiaries(
+            s.client.try_create_campaign_beneficiaries(
                 &s.creator,
                 &list,
                 &s.verifier,
@@ -5699,8 +5761,8 @@ mod split_payouts {
 
 mod schema {
     use super::*;
-    use crate::types::DataKey;
     use crate::SCHEMA_VERSION;
+    use crate::types::DataKey;
 
     /// Rewrites the stored state as an older build (before versioning) left it.
     fn downgrade_to_unversioned(s: &Setup) {
