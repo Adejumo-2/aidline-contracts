@@ -193,6 +193,9 @@ pub enum DataKey {
     SponsorPool(u64, Address),
     // Issue #29: verifier bonds
     VerifierBond(Address),
+    // Issue #140: historical verifier bonds: (verifier, nonce) -> VerifierBond
+    HistoricalVerifierBond(Address, u32),
+    VerifierBondNonce(Address),
     BondRequirement,
     BondWithdrawDelay,
     // Issue #30: pledges
@@ -215,6 +218,8 @@ pub enum DataKey {
     VerifierProfile(Address),
     // Paginated donors list
     CampaignDonors(u64),
+    // Slashed verifier bonds awaiting pro-rata refund to donors
+    SlashedRecovery(u64),
     // Issue #125: ids of the pledges made to one campaign
     CampaignPledges(u64),
     // Issue #129: campaigns a verifier is assigned to that are not yet completed or cancelled

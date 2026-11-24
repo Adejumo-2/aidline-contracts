@@ -306,6 +306,33 @@ pub fn save_verifier_bond(env: &Env, bond: &VerifierBond) {
     bump(env, &key);
 }
 
+pub fn verifier_bond_nonce(env: &Env, verifier: &Address) -> u32 {
+    let key = DataKey::VerifierBondNonce(verifier.clone());
+    let nonce: Option<u32> = env.storage().persistent().get(&key);
+    if nonce.is_some() {
+        bump(env, &key);
+    }
+    nonce.unwrap_or(0)
+}
+
+pub fn archive_verifier_bond(env: &Env, verifier: &Address, bond: &VerifierBond) {
+    let nonce = verifier_bond_nonce(env, verifier);
+    let hist_key = DataKey::HistoricalVerifierBond(verifier.clone(), nonce);
+    env.storage().persistent().set(&hist_key, bond);
+    bump(env, &hist_key);
+
+    let nonce_key = DataKey::VerifierBondNonce(verifier.clone());
+    env.storage().persistent().set(&nonce_key, &(nonce + 1));
+    bump(env, &nonce_key);
+}
+
+pub fn historical_verifier_bond(env: &Env, verifier: &Address, nonce: u32) -> Option<VerifierBond> {
+    let key = DataKey::HistoricalVerifierBond(verifier.clone(), nonce);
+    let bond = env.storage().persistent().get(&key)?;
+    bump(env, &key);
+    Some(bond)
+}
+
 // ─── Issue #30: Pledge storage ────────────────────────────────────────────────
 
 pub fn next_pledge_id(env: &Env) -> u64 {

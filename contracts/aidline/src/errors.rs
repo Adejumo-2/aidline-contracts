@@ -98,4 +98,7 @@ pub enum Error {
     // Streaming release
     NothingToClaim = 55,
     InvalidStream = 56,
+
+    // Proof URI validation
+    InvalidProofUri = 57,
 }

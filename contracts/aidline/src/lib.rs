@@ -27,19 +27,20 @@ pub use types::{
 
 use events::{
     AdminAccepted, AdminChanged, AdminProposed, BeneficiaryPaid, BondSlashed, BondWithdrawn,
-    CampaignCancelled, CancelVoteWithdrawn, CancelVoted, Migrated, StreamClaimed,
-    CampaignCancelledWithReason, CampaignCreated, ContractPaused, ContractUnpaused,
-    ContractUpgraded, DeadlineExtended, Donated, EmergencyAdvanceReleased, MatchingApplied,
-    MetadataUpdated, MilestoneApproved, MilestoneRejected, MilestoneReleased, PlatformFeeUpdated,
-    PledgeCancelled, PledgeCreated, PledgePulled, PledgeSettlement, PledgeSkipped, Refunded,
-    SponsorPoolDeposited, SponsorPoolReturned, TokenAllowlistUpdated, TreasuryUpdated,
-    VerifierBondPosted, VerifierDeregistered, VerifierProfileUpdated, VerifierReassigned,
-    VerifierUpdated,
+    CampaignCancelled, CampaignCancelledWithReason, CampaignCreated, CancelVoteWithdrawn,
+    CancelVoted, ContractPaused, ContractUnpaused, ContractUpgraded, DeadlineExtended, Donated,
+    EmergencyAdvanceReleased, MatchingApplied, MetadataUpdated, Migrated, MilestoneApproved,
+    MilestoneRejected, MilestoneReleased, PlatformFeeUpdated, PledgeCancelled, PledgeCreated,
+    PledgePulled, PledgeSettlement, PledgeSkipped, Refunded, SponsorPoolDeposited,
+    SponsorPoolReturned, StreamClaimed, TokenAllowlistUpdated, TreasuryUpdated, VerifierBondPosted,
+    VerifierDeregistered, VerifierProfileUpdated, VerifierReassigned, VerifierUpdated,
 };
 
 const MAX_MILESTONES: u32 = 20;
 /// Maximum length in bytes for metadata and proof URIs.
 const MAX_URI_LENGTH: u32 = 256;
+/// Maximum length in bytes for milestone proof URIs.
+pub const MAX_PROOF_URI_LENGTH: u32 = 500;
 /// Maximum matching ratio (100 % = 10 000 bps).
 const MAX_RATIO_BPS: u32 = 10_000;
 /// Maximum platform fee in basis points (200 bps = 2.00%).
@@ -89,8 +90,17 @@ impl Aidline {
     /// Called once at deployment time; may not be called again.
     ///
     /// # Errors
-    /// This function does not return errors; panics if storage is unavailable.
+    /// This function does not return errors; panics if storage is unavailable
+    /// or if `admin` and `token` are invalid (e.g. identical or self-referential).
     pub fn __constructor(env: Env, admin: Address, token: Address) {
+        if admin == token {
+            panic!("admin and token must be distinct");
+        }
+        let contract = env.current_contract_address();
+        if admin == contract || token == contract {
+            panic!("admin and token cannot be self address");
+        }
+
         storage::set_admin(&env, &admin);
         storage::set_token(&env, &token);
         storage::set_token_allowed(&env, &token, true);
@@ -328,6 +338,7 @@ impl Aidline {
         let mut version = from;
         while version < SCHEMA_VERSION {
             // Each arm upgrades the stored data from `version` to `version + 1`.
+            #[allow(clippy::single_match)]
             match version {
                 // 0 -> 1: the layout is unchanged; this step only marks the
                 // existing data as versioned.
@@ -467,6 +478,17 @@ impl Aidline {
             return Err(Error::Unauthorized);
         }
 
+        if let Some(existing_bond) = storage::verifier_bond(&env, &verifier) {
+            match existing_bond.status {
+                BondStatus::Active | BondStatus::PendingWithdrawal => {
+                    return Err(Error::Unauthorized);
+                }
+                BondStatus::Withdrawn | BondStatus::Slashed => {
+                    storage::archive_verifier_bond(&env, &verifier, &existing_bond);
+                }
+            }
+        }
+
         token::Client::new(&env, &storage::token(&env)).transfer(
             &verifier,
             env.current_contract_address(),
@@ -560,7 +582,10 @@ impl Aidline {
         }
 
         let delay = storage::bond_withdraw_delay(&env);
-        let elapsed = env.ledger().timestamp() - bond.deregistered_at;
+        let elapsed = env
+            .ledger()
+            .timestamp()
+            .saturating_sub(bond.deregistered_at);
         if elapsed < delay {
             return Err(Error::WithdrawDelayNotMet);
         }
@@ -655,6 +680,20 @@ impl Aidline {
     /// bond has ever been posted.
     pub fn get_verifier_bond(env: Env, verifier: Address) -> Option<VerifierBond> {
         storage::verifier_bond(&env, &verifier)
+    }
+
+    /// Returns the historical [`VerifierBond`] record for `verifier` at `nonce`.
+    pub fn get_historical_verifier_bond(
+        env: Env,
+        verifier: Address,
+        nonce: u32,
+    ) -> Option<VerifierBond> {
+        storage::historical_verifier_bond(&env, &verifier, nonce)
+    }
+
+    /// Returns the number of archived bond cycles for `verifier`.
+    pub fn get_verifier_bond_nonce(env: Env, verifier: Address) -> u32 {
+        storage::verifier_bond_nonce(&env, &verifier)
     }
 
     /// Returns the current required bond amount. `0` means no bond is required.
@@ -1014,7 +1053,7 @@ impl Aidline {
     ///   [`MAX_BENEFICIARIES`], has a zero share, repeats an address, or its
     ///   shares do not sum to 10,000.
     /// - [`Error::ConflictOfInterest`]: the verifier is one of the beneficiaries.
-    pub fn create_campaign_with_beneficiaries(
+    pub fn create_campaign_beneficiaries(
         env: Env,
         creator: Address,
         beneficiaries: Vec<Beneficiary>,
@@ -1074,14 +1113,16 @@ impl Aidline {
     /// - [`Error::CampaignNotFound`]: no campaign with `campaign_id` exists.
     pub fn get_beneficiaries(env: Env, campaign_id: u64) -> Result<Vec<Beneficiary>, Error> {
         let campaign = storage::campaign(&env, campaign_id)?;
-        Ok(storage::beneficiaries(&env, campaign_id).unwrap_or_else(|| {
-            let mut single = Vec::new(&env);
-            single.push_back(Beneficiary {
-                to: campaign.beneficiary,
-                bps: MAX_RATIO_BPS,
-            });
-            single
-        }))
+        Ok(
+            storage::beneficiaries(&env, campaign_id).unwrap_or_else(|| {
+                let mut single = Vec::new(&env);
+                single.push_back(Beneficiary {
+                    to: campaign.beneficiary,
+                    bps: MAX_RATIO_BPS,
+                });
+                single
+            }),
+        )
     }
 
     /// Updates the off-chain metadata URI for `campaign_id`.
@@ -1757,12 +1798,14 @@ impl Aidline {
             return Err(Error::AdvanceAlreadyTaken);
         }
 
-        // Cap: 20% of goal, rounded down (favors the contract, never exceeds).
+        // Cap: 20% of goal, rounded down, and never more than milestone 0.
+        let m0 = campaign.milestones.get(0).ok_or(Error::NoMilestonesLeft)?;
         let cap = campaign
             .goal
             .checked_mul(EMERGENCY_ADVANCE_BPS)
             .ok_or(Error::InvalidAmount)?
             / BPS_DENOM;
+        let cap = cap.min(m0);
 
         // Available escrow = raised − already released.
         let available = campaign.raised - campaign.released;
@@ -1826,7 +1869,7 @@ impl Aidline {
     /// identify and authorize which verifier is signing.
     ///
     /// # Errors
-    /// - [`Error::UriTooLong`]: `proof_uri` exceeds [`MAX_URI_LENGTH`] bytes.
+    /// - [`Error::InvalidProofUri`]: `proof_uri` is empty or exceeds [`MAX_PROOF_URI_LENGTH`] bytes.
     /// - [`Error::Unauthorized`]: campaign has multiple verifiers requiring specific authorization.
     /// - [`Error::CampaignNotFound`]: no campaign with `campaign_id` exists.
     /// - [`Error::NotVerifier`]: the campaign's verifier is no longer registered.
@@ -1834,6 +1877,9 @@ impl Aidline {
     /// - [`Error::NoMilestonesLeft`]: all milestones have already been released.
     /// - [`Error::MilestoneNotFunded`]: raised funds insufficient to cover the next milestone.
     pub fn approve_milestone(env: Env, campaign_id: u64, proof_uri: String) -> Result<i128, Error> {
+        if proof_uri.is_empty() || proof_uri.len() > MAX_PROOF_URI_LENGTH {
+            return Err(Error::InvalidProofUri);
+        }
         let campaign = storage::campaign(&env, campaign_id)?;
         if campaign.verifiers.len() > 1 && campaign.threshold > 1 {
             return Err(Error::Unauthorized);
@@ -1887,8 +1933,8 @@ impl Aidline {
         verifier: Address,
         proof_uri: String,
     ) -> Result<i128, Error> {
-        if proof_uri.len() > MAX_URI_LENGTH {
-            return Err(Error::UriTooLong);
+        if proof_uri.is_empty() || proof_uri.len() > MAX_PROOF_URI_LENGTH {
+            return Err(Error::InvalidProofUri);
         }
         Self::ensure_current_schema(env)?;
         verifier.require_auth();
@@ -2173,10 +2219,9 @@ impl Aidline {
             return Err(Error::InvalidAmount);
         }
 
-        let unreleased = campaign.raised - campaign.released;
-        let numerator = contributed
-            .checked_mul(unreleased)
-            .ok_or(Error::InvalidAmount)?;
+        let pool =
+            campaign.raised - campaign.released + storage::slashed_recovery(env, campaign_id);
+        let numerator = contributed.checked_mul(pool).ok_or(Error::InvalidAmount)?;
         let amount = numerator / campaign.raised;
 
         storage::set_contribution(env, campaign_id, donor, 0);
@@ -2420,10 +2465,15 @@ impl Aidline {
         if pool <= 0 {
             return 0;
         }
-        let Some(numerator) = contributed.checked_mul(unreleased) else {
+        let Some(numerator) = contributed.checked_mul(pool) else {
             return 0;
         };
         numerator / campaign.raised
+    }
+
+    /// Returns the slashed verifier bond amount held for `campaign_id`'s donors.
+    pub fn slashed_recovery(env: Env, campaign_id: u64) -> i128 {
+        storage::slashed_recovery(&env, campaign_id)
     }
 
     /// Returns `true` if `who` is currently a registered verifier.
