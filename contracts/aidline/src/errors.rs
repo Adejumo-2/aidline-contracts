@@ -101,4 +101,10 @@ pub enum Error {
 
     // Proof URI validation
     InvalidProofUri = 57,
+
+    // Metadata URI validation
+    InvalidMetadataUri = 58,
+
+    // Verifier reassignment
+    VerifierCannotBeBeneficiary = 59,
 }

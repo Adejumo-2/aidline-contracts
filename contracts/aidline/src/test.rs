@@ -8,7 +8,7 @@ use soroban_sdk::{
     vec,
 };
 
-use crate::{Aidline, AidlineClient, CampaignKind, CampaignStatus, Error};
+use crate::{Aidline, AidlineClient, CampaignKind, CampaignStatus, Error, MIN_DONATION_AMOUNT};
 
 const DAY: u64 = 86_400;
 
@@ -234,14 +234,28 @@ fn rejects_bad_milestones_and_deadline() {
 }
 
 #[test]
-fn rejects_long_metadata_uri() {
+fn rejects_invalid_metadata_uri() {
     let s = Setup::new();
     let future = s.env.ledger().timestamp() + DAY;
 
-    // 257 bytes should fail with UriTooLong
-    let long_str = "a".repeat(257);
+    // Empty metadata URI should fail with InvalidMetadataUri
+    let empty_uri = String::from_str(&s.env, "");
+    let res_empty = s.client.try_create_campaign(
+        &s.creator,
+        &s.beneficiary,
+        &s.verifier,
+        &s.token.address,
+        &CampaignKind::Climate,
+        &empty_uri,
+        &future,
+        &vec![&s.env, 100],
+    );
+    assert_eq!(res_empty, Err(Ok(Error::InvalidMetadataUri)));
+
+    // 501 bytes should fail with InvalidMetadataUri
+    let long_str = "a".repeat(501);
     let long_uri = String::from_str(&s.env, &long_str);
-    let res = s.client.try_create_campaign(
+    let res_long = s.client.try_create_campaign(
         &s.creator,
         &s.beneficiary,
         &s.verifier,
@@ -251,10 +265,10 @@ fn rejects_long_metadata_uri() {
         &future,
         &vec![&s.env, 100],
     );
-    assert_eq!(res, Err(Ok(Error::UriTooLong)));
+    assert_eq!(res_long, Err(Ok(Error::InvalidMetadataUri)));
 
-    // Exact limit 256 bytes should succeed
-    let max_str = "a".repeat(256);
+    // Exact limit 500 bytes should succeed
+    let max_str = "a".repeat(500);
     let max_uri = String::from_str(&s.env, &max_str);
     let ok_res = s.client.try_create_campaign(
         &s.creator,
@@ -267,6 +281,47 @@ fn rejects_long_metadata_uri() {
         &vec![&s.env, 100],
     );
     assert!(ok_res.is_ok());
+
+    // Valid IPFS URI succeeds
+    let ipfs_uri = String::from_str(&s.env, "ipfs://bafybeicg2gg33zrqb33rqd6dffq72u7i7743rqd6d");
+    let ok_ipfs = s.client.try_create_campaign(
+        &s.creator,
+        &s.beneficiary,
+        &s.verifier,
+        &s.token.address,
+        &CampaignKind::Climate,
+        &ipfs_uri,
+        &future,
+        &vec![&s.env, 100],
+    );
+    assert!(ok_ipfs.is_ok());
+
+    // create_campaign_with_due_dates also validates metadata_uri
+    let res_due_empty = s.client.try_create_campaign_with_due_dates(
+        &s.creator,
+        &s.beneficiary,
+        &s.verifier,
+        &s.token.address,
+        &CampaignKind::Climate,
+        &empty_uri,
+        &future,
+        &vec![&s.env, 100],
+        &vec![&s.env, future - 10],
+    );
+    assert_eq!(res_due_empty, Err(Ok(Error::InvalidMetadataUri)));
+
+    let res_due_long = s.client.try_create_campaign_with_due_dates(
+        &s.creator,
+        &s.beneficiary,
+        &s.verifier,
+        &s.token.address,
+        &CampaignKind::Climate,
+        &long_uri,
+        &future,
+        &vec![&s.env, 100],
+        &vec![&s.env, future - 10],
+    );
+    assert_eq!(res_due_long, Err(Ok(Error::InvalidMetadataUri)));
 }
 
 #[test]
@@ -1303,7 +1358,7 @@ fn three_donors_reach_goal_exactly_fourth_fails() {
 
     // A fourth donation of any amount must fail with GoalExceeded.
     assert_eq!(
-        s.client.try_donate(&d4, &id, &1),
+        s.client.try_donate(&d4, &id, &MIN_DONATION_AMOUNT),
         Err(Ok(Error::GoalExceeded))
     );
     assert_eq!(
@@ -1339,7 +1394,7 @@ fn two_donors_reach_goal_exactly_campaign_fully_funded() {
     // Campaign is exactly at goal, no room for even 1 more token.
     let d3 = s.donor(10);
     assert_eq!(
-        s.client.try_donate(&d3, &id, &1),
+        s.client.try_donate(&d3, &id, &MIN_DONATION_AMOUNT),
         Err(Ok(Error::GoalExceeded))
     );
 
@@ -1380,6 +1435,25 @@ fn reassign_fails_for_unregistered_verifier() {
         s.client.try_reassign_verifier(&id, &stranger),
         Err(Ok(Error::NotVerifier))
     );
+}
+
+#[test]
+fn reassign_verifier_rejects_campaign_beneficiary() {
+    let s = Setup::new();
+    let id = s.campaign();
+
+    // Register beneficiary as a verifier in the system
+    s.client.add_verifier(&s.beneficiary);
+
+    // Admin attempts to reassign the campaign's verifier to the beneficiary
+    let res = s.client.try_reassign_verifier(&id, &s.beneficiary);
+    assert_eq!(res, Err(Ok(Error::VerifierCannotBeBeneficiary)));
+
+    // Legitimate reassignment to a distinct registered verifier succeeds
+    let new_v = Address::generate(&s.env);
+    s.client.add_verifier(&new_v);
+    assert!(s.client.try_reassign_verifier(&id, &new_v).is_ok());
+    assert_eq!(s.client.get_campaign(&id).verifier, new_v);
 }
 
 #[test]
@@ -3828,9 +3902,33 @@ fn minimum_donation_of_zero_behaves_as_normal() {
     let id = s.campaign_with_min_donation(0);
     let donor = s.donor(100);
 
-    // Any positive donation is accepted when min_donation is 0.
-    let accepted = s.client.donate(&donor, &id, &1);
-    assert_eq!(accepted, 1);
+    // Any donation at or above MIN_DONATION_AMOUNT is accepted when min_donation is 0.
+    let accepted = s.client.donate(&donor, &id, &MIN_DONATION_AMOUNT);
+    assert_eq!(accepted, MIN_DONATION_AMOUNT);
+}
+
+#[test]
+fn test_donate_dust_spam_rejected() {
+    let s = Setup::new();
+    let id = s.campaign();
+    let donor = s.donor(100);
+
+    // 1-stroop dust donation must be rejected with InvalidAmount
+    let res = s.client.try_donate(&donor, &id, &1);
+    assert_eq!(res, Err(Ok(Error::InvalidAmount)));
+}
+
+#[test]
+fn test_donate_exact_minimum_succeeds() {
+    let s = Setup::new();
+    let id = s.campaign();
+    let donor = s.donor(100);
+
+    // Donating exactly MIN_DONATION_AMOUNT must succeed
+    let accepted = s.client.donate(&donor, &id, &MIN_DONATION_AMOUNT);
+    assert_eq!(accepted, MIN_DONATION_AMOUNT);
+    assert_eq!(s.client.get_campaign(&id).raised, MIN_DONATION_AMOUNT);
+    assert_eq!(s.client.contribution_of(&id, &donor), MIN_DONATION_AMOUNT);
 }
 
 #[test]
@@ -5340,8 +5438,8 @@ mod streaming {
 #[test]
 fn refund_pro_rata_overflow_returns_invalid_amount() {
     let s = Setup::new();
-    let half_max = i128::MAX / 2;
-    let milestones = vec![&s.env, half_max, half_max];
+    let donor1_amount: i128 = 2_000_000_000_000_000_000_000_000_000_000;
+    let milestones = vec![&s.env, donor1_amount, donor1_amount];
     let id = s.client.create_campaign(
         &s.creator,
         &s.beneficiary,
@@ -5353,15 +5451,15 @@ fn refund_pro_rata_overflow_returns_invalid_amount() {
         &milestones,
     );
 
-    let donor1 = s.donor(half_max);
-    let donor2 = s.donor(1);
+    let donor1 = s.donor(donor1_amount);
+    let donor2 = s.donor(MIN_DONATION_AMOUNT);
 
-    s.client.donate(&donor1, &id, &half_max);
-    s.client.donate(&donor2, &id, &1);
+    s.client.donate(&donor1, &id, &donor1_amount);
+    s.client.donate(&donor2, &id, &MIN_DONATION_AMOUNT);
 
     s.client.cancel_campaign(&s.creator, &id);
 
-    // donor1: contributed = half_max, unreleased = half_max + 1.
+    // donor1: contributed = donor1_amount, unreleased = donor1_amount + MIN_DONATION_AMOUNT.
     // contributed * unreleased overflows i128::MAX -> returns Err(Ok(Error::InvalidAmount))
     assert_eq!(
         s.client.try_refund(&donor1, &id),
@@ -5373,10 +5471,10 @@ fn refund_pro_rata_overflow_returns_invalid_amount() {
     );
     assert_eq!(s.client.refundable_amount(&id, &donor1), 0);
 
-    // donor2: contributed = 1, unreleased = half_max + 1.
-    // 1 * (half_max + 1) does not overflow -> succeeds
+    // donor2: contributed = MIN_DONATION_AMOUNT, unreleased = donor1_amount + MIN_DONATION_AMOUNT.
+    // MIN_DONATION_AMOUNT * (donor1_amount + MIN_DONATION_AMOUNT) does not overflow -> succeeds
     let refunded2 = s.client.refund(&donor2, &id);
-    assert_eq!(refunded2, 1);
+    assert_eq!(refunded2, MIN_DONATION_AMOUNT);
 }
 
 #[test]

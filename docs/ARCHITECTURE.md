@@ -401,7 +401,7 @@ If a donor's token allowance is 0 or insufficient for their share:
 1. Donor approves the token contract: `token.approve(donor, aidline_contract, pledged_amount, expiry)`.
 2. Donor calls `create_pledge(donor, campaign_id, pledged_amount)`.
 3. When each milestone is approved, the contract automatically pulls the donor's proportional share.
-4. If the donor revokes their allowance, the pledge is silently skipped.
+4. If the donor revokes their allowance, the pledge is silently skipped. Alternatively, donors can formally cancel their pledge on-chain by calling `cancel_pledge(donor, pledge_id)`, which marks the pledge inactive and emits a `PledgeCancelled` event.
 
 ### Security and trust trade-offs
 
