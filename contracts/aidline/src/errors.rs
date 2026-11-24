@@ -80,4 +80,13 @@ pub enum Error {
 
     // Milestone due date
     MilestoneOverdue = 42,
+
+    // Challenge window
+    NoChallengeWindow = 60,
+    ProposalPending = 61,
+    NoProposal = 62,
+    WindowNotElapsed = 63,
+    InvalidChallengeWindow = 64,
+    WindowClosed = 65,
+    AlreadyChallenged = 66,
 }

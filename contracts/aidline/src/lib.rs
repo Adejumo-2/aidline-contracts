@@ -21,11 +21,13 @@ use soroban_sdk::{
 
 pub use errors::Error;
 pub use types::{
-    BondStatus, Campaign, CampaignKind, CampaignStatus, Pledge, SponsorPool, VerifierBond,
+    BondStatus, Campaign, CampaignKind, CampaignStatus, PendingApproval, Pledge, SponsorPool,
+    VerifierBond,
 };
 
 use events::{
-    AdminAccepted, AdminChanged, AdminProposed, BondSlashed, SlasherChanged, BondWithdrawn, CampaignCancelled,
+    AdminAccepted, AdminChanged, AdminProposed, BondSlashed, MilestoneBlocked,
+    MilestoneFinalized, MilestoneProposed, SlasherChanged, BondWithdrawn, CampaignCancelled,
     CampaignCancelledWithReason, CampaignCreated, ContractPaused, ContractUnpaused,
     ContractUpgraded, DeadlineExtended, Donated, EmergencyAdvanceReleased, MatchingApplied,
     MetadataUpdated, MilestoneApproved, MilestoneRejected, MilestoneReleased, PlatformFeeUpdated,
@@ -52,6 +54,13 @@ const MAX_DEADLINE_EXTENSION: u64 = 30 * 86_400;
 
 /// Maximum number of times a campaign's verifier may be reassigned.
 pub const MAX_VERIFIER_REASSIGNMENTS: u32 = 2;
+
+/// Longest challenge window a campaign may set, in seconds (Issue #115).
+pub const MAX_CHALLENGE_WINDOW: u64 = 14 * 86_400;
+
+/// Share of `raised`, in basis points, that donors' block votes must reach to
+/// block a proposed approval without the admin (Issue #115).
+pub const BLOCK_QUORUM_BPS: i128 = 3_000;
 /// Maximum page limit for paginated donor enumeration.
 const MAX_DONORS_PAGE_LIMIT: u32 = 50;
 
@@ -935,6 +944,169 @@ impl Aidline {
         Ok(id)
     }
 
+    /// Creates a campaign whose milestone approvals wait out a challenge window
+    /// and returns its ID (Issue #115).
+    ///
+    /// With `challenge_window` seconds above zero, an approval that reaches the
+    /// verifier threshold does not pay out. It becomes a pending proposal that
+    /// anyone can [`finalize_milestone`] once the window has passed, and that
+    /// the admin, or donors holding [`BLOCK_QUORUM_BPS`] of `raised`, can
+    /// [`block_milestone`] meanwhile. A window of `0` is the normal immediate
+    /// behaviour. Other arguments and errors are those of [`create_campaign`].
+    ///
+    /// # Errors
+    /// - [`Error::InvalidChallengeWindow`]: `challenge_window` exceeds
+    ///   [`MAX_CHALLENGE_WINDOW`].
+    pub fn create_campaign_with_challenge_window(
+        env: Env,
+        creator: Address,
+        beneficiary: Address,
+        verifier: Address,
+        token: Address,
+        kind: CampaignKind,
+        metadata_uri: String,
+        deadline: u64,
+        milestones: Vec<i128>,
+        challenge_window: u64,
+    ) -> Result<u64, Error> {
+        if challenge_window > MAX_CHALLENGE_WINDOW {
+            return Err(Error::InvalidChallengeWindow);
+        }
+        let id = Self::create_campaign(
+            env.clone(),
+            creator,
+            beneficiary,
+            verifier,
+            token,
+            kind,
+            metadata_uri,
+            deadline,
+            milestones,
+        )?;
+        if challenge_window > 0 {
+            storage::set_challenge_window(&env, id, challenge_window);
+        }
+        Ok(id)
+    }
+
+    /// Proposes the next milestone's approval on a campaign with a challenge
+    /// window (Issue #115). Same checks and effect as
+    /// [`approve_milestone_multisig`], except that when the threshold is
+    /// reached the funds stay in escrow until [`finalize_milestone`]. Returns
+    /// `0` because nothing is paid yet. Emits [`MilestoneProposed`].
+    ///
+    /// # Errors
+    /// - [`Error::NoChallengeWindow`]: the campaign pays out immediately.
+    /// - [`Error::ProposalPending`]: an earlier proposal is still waiting.
+    /// - Otherwise the errors of [`approve_milestone_multisig`].
+    pub fn propose_milestone_approval(
+        env: Env,
+        campaign_id: u64,
+        verifier: Address,
+        proof_uri: String,
+    ) -> Result<i128, Error> {
+        if storage::challenge_window(&env, campaign_id) == 0 {
+            return Err(Error::NoChallengeWindow);
+        }
+        Self::internal_approve_milestone(&env, campaign_id, verifier, proof_uri)
+    }
+
+    /// Pays out a proposed milestone once its challenge window has passed
+    /// (Issue #115). Anyone may call it. Returns the milestone amount and emits
+    /// [`MilestoneFinalized`] and [`MilestoneReleased`].
+    ///
+    /// # Errors
+    /// - [`Error::NoProposal`]: nothing is pending for the campaign.
+    /// - [`Error::WindowNotElapsed`]: the challenge window is still open.
+    /// - Otherwise the funding and status errors of a normal release.
+    pub fn finalize_milestone(env: Env, campaign_id: u64) -> Result<i128, Error> {
+        if storage::is_paused(&env) {
+            return Err(Error::Paused);
+        }
+        let campaign = storage::campaign(&env, campaign_id)?;
+        let pending = storage::pending_approval(&env, campaign_id).ok_or(Error::NoProposal)?;
+        if env.ledger().timestamp() < pending.ready_at {
+            return Err(Error::WindowNotElapsed);
+        }
+        Self::ensure_open(&env, &campaign)?;
+        let milestone_amount = campaign
+            .milestones
+            .get(pending.index)
+            .ok_or(Error::NoMilestonesLeft)?;
+
+        storage::remove_pending_approval(&env, campaign_id);
+        MilestoneFinalized {
+            campaign_id,
+            index: pending.index,
+        }
+        .publish(&env);
+        Self::release_milestone(&env, campaign, pending.index, milestone_amount, pending.proof_uri)
+    }
+
+    /// Blocks a proposed approval during its challenge window (Issue #115).
+    ///
+    /// The admin blocks it alone. A donor adds their contribution to the block
+    /// votes, once per proposal, and the proposal is blocked when the votes
+    /// reach [`BLOCK_QUORUM_BPS`] of `raised`. A blocked approval returns to
+    /// pending: its approvals are cleared so the verifier can propose it again.
+    /// Returns `true` if this call blocked it. Emits [`MilestoneBlocked`].
+    ///
+    /// # Errors
+    /// - [`Error::NoProposal`]: nothing is pending for the campaign.
+    /// - [`Error::WindowClosed`]: the challenge window has already passed.
+    /// - [`Error::AlreadyChallenged`]: this donor already voted on this proposal.
+    /// - [`Error::NothingToRefund`]: the caller is neither the admin nor a donor.
+    pub fn block_milestone(env: Env, caller: Address, campaign_id: u64) -> Result<bool, Error> {
+        caller.require_auth();
+        let campaign = storage::campaign(&env, campaign_id)?;
+        let mut pending = storage::pending_approval(&env, campaign_id).ok_or(Error::NoProposal)?;
+        if env.ledger().timestamp() >= pending.ready_at {
+            return Err(Error::WindowClosed);
+        }
+
+        let blocked = if caller == storage::admin(&env) {
+            true
+        } else {
+            if storage::has_block_vote(&env, campaign_id, pending.nonce, &caller) {
+                return Err(Error::AlreadyChallenged);
+            }
+            let weight = storage::contribution(&env, campaign_id, &caller);
+            if weight <= 0 {
+                return Err(Error::NothingToRefund);
+            }
+            storage::set_block_vote(&env, campaign_id, pending.nonce, &caller);
+            pending.block_weight += weight;
+            if pending.block_weight * 10_000 >= campaign.raised * BLOCK_QUORUM_BPS {
+                true
+            } else {
+                storage::save_pending_approval(&env, campaign_id, &pending);
+                false
+            }
+        };
+
+        if blocked {
+            storage::remove_pending_approval(&env, campaign_id);
+            storage::save_milestone_approvals(&env, campaign_id, pending.index, &Vec::new(&env));
+            MilestoneBlocked {
+                campaign_id,
+                index: pending.index,
+                by: caller,
+            }
+            .publish(&env);
+        }
+        Ok(blocked)
+    }
+
+    /// Returns the proposal waiting for `finalize_milestone`, if any.
+    pub fn pending_approval(env: Env, campaign_id: u64) -> Option<PendingApproval> {
+        storage::pending_approval(&env, campaign_id)
+    }
+
+    /// Returns the campaign's challenge window in seconds (`0` for none).
+    pub fn challenge_window(env: Env, campaign_id: u64) -> u64 {
+        storage::challenge_window(&env, campaign_id)
+    }
+
     /// Updates the off-chain metadata URI for `campaign_id`.
     ///
     /// Only the campaign's creator may call this, and only before any
@@ -1567,7 +1739,7 @@ impl Aidline {
             return Err(Error::Paused);
         }
 
-        let mut campaign = storage::campaign(env, campaign_id)?;
+        let campaign = storage::campaign(env, campaign_id)?;
         if !campaign.verifiers.contains(&verifier) {
             return Err(Error::NotVerifier);
         }
@@ -1575,6 +1747,9 @@ impl Aidline {
             return Err(Error::NotVerifier);
         }
         Self::ensure_open(env, &campaign)?;
+        if storage::pending_approval(env, campaign_id).is_some() {
+            return Err(Error::ProposalPending);
+        }
 
         let index = campaign.milestones_released;
         let milestone_amount = campaign
@@ -1611,7 +1786,47 @@ impl Aidline {
             return Ok(0);
         }
 
-        // Threshold reached! Release the milestone.
+        // With a challenge window the funds do not move yet: the approval waits
+        // for `finalize_milestone` and can be blocked in the meantime (#115).
+        let window = storage::challenge_window(env, campaign_id);
+        if window > 0 {
+            let now = env.ledger().timestamp();
+            let ready_at = now.saturating_add(window);
+            storage::save_pending_approval(
+                env,
+                campaign_id,
+                &PendingApproval {
+                    index,
+                    proof_uri,
+                    proposed_at: now,
+                    ready_at,
+                    block_weight: 0,
+                    nonce: storage::next_proposal_nonce(env, campaign_id),
+                },
+            );
+            MilestoneProposed {
+                campaign_id,
+                index,
+                ready_at,
+            }
+            .publish(env);
+            return Ok(0);
+        }
+
+        Self::release_milestone(env, campaign, index, milestone_amount, proof_uri)
+    }
+
+    /// Pays out the milestone `index` of `campaign`: pulls pledges, checks the
+    /// escrow covers it, pays the beneficiary and the platform fee and advances
+    /// the campaign. Shared by immediate approval and `finalize_milestone`.
+    fn release_milestone(
+        env: &Env,
+        mut campaign: Campaign,
+        index: u32,
+        milestone_amount: i128,
+        proof_uri: String,
+    ) -> Result<i128, Error> {
+        let campaign_id = campaign.id;
         let pledge_count = storage::next_pledge_id_peek(env);
         let total_pledged_pulled = Self::pull_pledges(
             env,
