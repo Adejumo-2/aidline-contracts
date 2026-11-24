@@ -98,6 +98,20 @@ pub struct SponsorPool {
     pub matched: i128,
 }
 
+/// A milestone payout that vests linearly after approval (Issue #117).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Stream {
+    /// Amount that will vest in total (shrinks to the vested amount on cancel).
+    pub total: i128,
+    /// Ledger timestamp (seconds) at which vesting started: the approval.
+    pub start: u64,
+    /// Seconds over which `total` vests. `0` means fully vested.
+    pub duration: u64,
+    /// Amount the beneficiary has already claimed.
+    pub claimed: i128,
+}
+
 /// Running record of a verifier's work, kept on chain (Issue #119). One fixed
 /// size entry per verifier, however many campaigns they have handled.
 #[contracttype]
@@ -201,6 +215,17 @@ pub enum DataKey {
     VerifierProfile(Address),
     // Paginated donors list
     CampaignDonors(u64),
+    // Issue #125: ids of the pledges made to one campaign
+    CampaignPledges(u64),
+    // Issue #129: campaigns a verifier is assigned to that are not yet completed or cancelled
+    VerifierActiveCampaigns(Address),
+    // Issue #114: donor votes to cancel a stalled campaign
+    CancelVote(u64, Address),
+    CancelVoteTotal(u64),
+    CampaignStart(u64),
+    // Issue #117: per-milestone streaming release
+    MilestoneStreamDays(u64),
+    Stream(u64, u32),
     // Issue #116: beneficiaries of a split-payout campaign
     Beneficiaries(u64),
     // Issue #118: version of the stored data layout (instance storage)

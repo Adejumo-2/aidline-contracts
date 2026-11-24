@@ -86,4 +86,16 @@ pub enum Error {
 
     // Storage schema versioning
     MigrationPending = 49,
+    // Verifier bond withdrawal
+    VerifierHasActiveCampaigns = 50,
+
+    // Donor vote to cancel
+    AlreadyVoted = 51,
+    NoVote = 52,
+    NotStalled = 53,
+    VoteThresholdNotReached = 54,
+
+    // Streaming release
+    NothingToClaim = 55,
+    InvalidStream = 56,
 }

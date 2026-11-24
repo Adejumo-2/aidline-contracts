@@ -21,12 +21,13 @@ use soroban_sdk::{
 
 pub use errors::Error;
 pub use types::{
-    Beneficiary, BondStatus, Campaign, CampaignKind, CampaignStatus, Pledge, SponsorPool,
+    Beneficiary, BondStatus, Campaign, CampaignKind, CampaignStatus, Pledge, SponsorPool, Stream,
     VerifierBond, VerifierStats,
 };
 
 use events::{
-    AdminAccepted, AdminChanged, AdminProposed, BeneficiaryPaid, BondSlashed, Migrated, BondWithdrawn, CampaignCancelled,
+    AdminAccepted, AdminChanged, AdminProposed, BeneficiaryPaid, BondSlashed, BondWithdrawn,
+    CampaignCancelled, CancelVoteWithdrawn, CancelVoted, Migrated, StreamClaimed,
     CampaignCancelledWithReason, CampaignCreated, ContractPaused, ContractUnpaused,
     ContractUpgraded, DeadlineExtended, Donated, EmergencyAdvanceReleased, MatchingApplied,
     MetadataUpdated, MilestoneApproved, MilestoneRejected, MilestoneReleased, PlatformFeeUpdated,
@@ -56,6 +57,12 @@ const MAX_DEADLINE_EXTENSION: u64 = 30 * 86_400;
 /// Maximum number of times a campaign's verifier may be reassigned.
 pub const MAX_VERIFIER_REASSIGNMENTS: u32 = 2;
 
+/// Seconds a campaign must go without progress (campaign start or the last
+/// approved milestone, whichever is later) before donors can cancel it by vote.
+pub const STALL_PERIOD: u64 = 14 * 86_400;
+
+/// Share of `raised`, in basis points, that cancel votes must reach.
+pub const CANCEL_VOTE_BPS: i128 = 5_000;
 /// Version of the stored data layout this build reads and writes (Issue #118).
 /// Bump it when a stored struct changes and add the step to `migrate`.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -546,6 +553,12 @@ impl Aidline {
             return Err(Error::BondNotWithdrawable);
         }
 
+        // The bond is the collateral for every campaign the verifier is still
+        // responsible for, so it stays slashable until they are all finished.
+        if storage::active_campaigns(&env, &verifier) > 0 {
+            return Err(Error::VerifierHasActiveCampaigns);
+        }
+
         let delay = storage::bond_withdraw_delay(&env);
         let elapsed = env.ledger().timestamp() - bond.deregistered_at;
         if elapsed < delay {
@@ -915,6 +928,8 @@ impl Aidline {
             last_approval_time: 0,
         };
         storage::save_campaign(&env, &campaign);
+        storage::set_campaign_start(&env, id, env.ledger().timestamp());
+        Self::open_verifier_assignments(&env, &campaign.verifiers);
         Self::bump_all_verifiers(&env, &campaign.verifiers, |s| s.campaigns_assigned += 1);
 
         CampaignCreated {
@@ -1481,6 +1496,9 @@ impl Aidline {
             active: true,
         };
         storage::save_pledge(&env, &pledge);
+        let mut campaign_pledges = storage::campaign_pledges(&env, campaign_id);
+        campaign_pledges.push_back(pledge_id);
+        storage::save_campaign_pledges(&env, campaign_id, &campaign_pledges);
 
         PledgeCreated {
             pledge_id,
@@ -1491,6 +1509,177 @@ impl Aidline {
         .publish(&env);
 
         Ok(pledge_id)
+    }
+
+    /// Creates a campaign whose milestones can release linearly over time and
+    /// returns its ID (Issue #117).
+    ///
+    /// `stream_days` has one entry per milestone. `0` keeps that milestone a
+    /// lump sum; a positive value makes its payout vest linearly over that many
+    /// days after approval, claimed with [`claim_streamed`]. Other arguments and
+    /// errors are those of [`create_campaign`].
+    ///
+    /// # Errors
+    /// - [`Error::InvalidStream`]: `stream_days` and `milestones` differ in length.
+    pub fn create_campaign_with_streams(
+        env: Env,
+        creator: Address,
+        beneficiary: Address,
+        verifier: Address,
+        token: Address,
+        kind: CampaignKind,
+        metadata_uri: String,
+        deadline: u64,
+        milestones: Vec<i128>,
+        stream_days: Vec<u32>,
+    ) -> Result<u64, Error> {
+        if stream_days.len() != milestones.len() {
+            return Err(Error::InvalidStream);
+        }
+        let id = Self::create_campaign(
+            env.clone(),
+            creator,
+            beneficiary,
+            verifier,
+            token,
+            kind,
+            metadata_uri,
+            deadline,
+            milestones,
+        )?;
+        if stream_days.iter().any(|days| days > 0) {
+            storage::set_milestone_stream_days(&env, id, &stream_days);
+        }
+        Ok(id)
+    }
+
+    /// Pays the beneficiary everything that has vested from the campaign's
+    /// streamed milestones and not yet been claimed, and returns the amount.
+    ///
+    /// Only the beneficiary may call this, and can do so as often as they like.
+    /// Emits [`StreamClaimed`].
+    ///
+    /// # Errors
+    /// - [`Error::CampaignNotFound`]: no campaign with `campaign_id` exists.
+    /// - [`Error::NothingToClaim`]: nothing has vested since the last claim.
+    pub fn claim_streamed(env: Env, campaign_id: u64) -> Result<i128, Error> {
+        let campaign = storage::campaign(&env, campaign_id)?;
+        campaign.beneficiary.require_auth();
+
+        let mut claimable: i128 = 0;
+        for index in 0..campaign.milestones_released {
+            if let Some(mut stream) = storage::stream(&env, campaign_id, index) {
+                let due = Self::vested(&env, &stream) - stream.claimed;
+                if due > 0 {
+                    stream.claimed += due;
+                    storage::save_stream(&env, campaign_id, index, &stream);
+                    claimable += due;
+                }
+            }
+        }
+        if claimable <= 0 {
+            return Err(Error::NothingToClaim);
+        }
+
+        Self::pay_beneficiaries(&env, &campaign, claimable);
+        StreamClaimed {
+            campaign_id,
+            amount: claimable,
+        }
+        .publish(&env);
+        Ok(claimable)
+    }
+
+    /// Votes to cancel a campaign, weighted by the donor's contribution
+    /// (Issue #114).
+    ///
+    /// Each donor votes once while the campaign is `Active`. Once the votes
+    /// reach [`CANCEL_VOTE_BPS`] of `raised` and the campaign has made no
+    /// progress for [`STALL_PERIOD`], the campaign is cancelled and refunds
+    /// open. Returns `true` if this vote cancelled it. Emits [`CancelVoted`],
+    /// and [`CampaignCancelled`] when it cancels.
+    ///
+    /// # Errors
+    /// - [`Error::CampaignNotFound`] / [`Error::CampaignNotActive`]
+    /// - [`Error::AlreadyVoted`]: this donor already has a vote on the campaign.
+    /// - [`Error::NothingToRefund`]: the donor has no contribution to weigh.
+    pub fn vote_cancel(env: Env, donor: Address, campaign_id: u64) -> Result<bool, Error> {
+        donor.require_auth();
+        let mut campaign = storage::campaign(&env, campaign_id)?;
+        if campaign.status != CampaignStatus::Active {
+            return Err(Error::CampaignNotActive);
+        }
+        if storage::cancel_vote(&env, campaign_id, &donor) > 0 {
+            return Err(Error::AlreadyVoted);
+        }
+        let weight = storage::contribution(&env, campaign_id, &donor);
+        if weight <= 0 {
+            return Err(Error::NothingToRefund);
+        }
+
+        let total = storage::cancel_vote_total(&env, campaign_id) + weight;
+        storage::set_cancel_vote(&env, campaign_id, &donor, weight);
+        storage::set_cancel_vote_total(&env, campaign_id, total);
+        CancelVoted {
+            campaign_id,
+            donor,
+            weight,
+            total,
+        }
+        .publish(&env);
+
+        Ok(Self::cancel_by_vote(&env, &mut campaign).is_ok())
+    }
+
+    /// Withdraws the donor's cancel vote while the campaign is still `Active`.
+    /// Emits [`CancelVoteWithdrawn`].
+    ///
+    /// # Errors
+    /// - [`Error::CampaignNotFound`] / [`Error::CampaignNotActive`]
+    /// - [`Error::NoVote`]: the donor has no vote on this campaign.
+    pub fn withdraw_cancel_vote(env: Env, donor: Address, campaign_id: u64) -> Result<(), Error> {
+        donor.require_auth();
+        let campaign = storage::campaign(&env, campaign_id)?;
+        if campaign.status != CampaignStatus::Active {
+            return Err(Error::CampaignNotActive);
+        }
+        let weight = storage::cancel_vote(&env, campaign_id, &donor);
+        if weight <= 0 {
+            return Err(Error::NoVote);
+        }
+
+        let total = storage::cancel_vote_total(&env, campaign_id) - weight;
+        storage::set_cancel_vote(&env, campaign_id, &donor, 0);
+        storage::set_cancel_vote_total(&env, campaign_id, total);
+        CancelVoteWithdrawn {
+            campaign_id,
+            donor,
+            weight,
+            total,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Cancels the campaign if its votes already reached the threshold and the
+    /// stall period has now passed. Anyone may call it; this is how votes cast
+    /// before the stall period ended take effect (Issue #114).
+    ///
+    /// # Errors
+    /// - [`Error::CampaignNotFound`] / [`Error::CampaignNotActive`]
+    /// - [`Error::NotStalled`]: the stall period has not passed.
+    /// - [`Error::VoteThresholdNotReached`]: the votes are below the threshold.
+    pub fn execute_vote_cancel(env: Env, campaign_id: u64) -> Result<(), Error> {
+        let mut campaign = storage::campaign(&env, campaign_id)?;
+        if campaign.status != CampaignStatus::Active {
+            return Err(Error::CampaignNotActive);
+        }
+        Self::cancel_by_vote(&env, &mut campaign)
+    }
+
+    /// Returns the total weight of cancel votes on `campaign_id`.
+    pub fn cancel_vote_weight(env: Env, campaign_id: u64) -> i128 {
+        storage::cancel_vote_total(&env, campaign_id)
     }
 
     /// Cancels an active pledge, marking it inactive.
@@ -1754,14 +1943,8 @@ impl Aidline {
         }
 
         // Threshold reached! Release the milestone.
-        let pledge_count = storage::next_pledge_id_peek(env);
-        let total_pledged_pulled = Self::pull_pledges(
-            env,
-            campaign_id,
-            milestone_amount,
-            pledge_count,
-            &mut campaign,
-        );
+        let total_pledged_pulled =
+            Self::pull_pledges(env, campaign_id, milestone_amount, &mut campaign);
 
         PledgeSettlement {
             campaign_id,
@@ -1794,7 +1977,26 @@ impl Aidline {
         let beneficiary_payout = remaining - fee;
 
         if beneficiary_payout > 0 {
-            Self::pay_beneficiaries(env, &campaign, beneficiary_payout);
+            let stream_days = storage::milestone_stream_days(env, campaign_id)
+                .and_then(|days| days.get(index))
+                .unwrap_or(0);
+            if stream_days > 0 {
+                // A streamed milestone vests over time instead of paying out
+                // now; the funds stay in escrow until claimed (Issue #117).
+                storage::save_stream(
+                    env,
+                    campaign_id,
+                    index,
+                    &Stream {
+                        total: beneficiary_payout,
+                        start: env.ledger().timestamp(),
+                        duration: stream_days as u64 * 86_400,
+                        claimed: 0,
+                    },
+                );
+            } else {
+                Self::pay_beneficiaries(env, &campaign, beneficiary_payout);
+            }
         }
 
         if fee > 0
@@ -1812,6 +2014,7 @@ impl Aidline {
         campaign.last_approval_time = env.ledger().timestamp();
         if campaign.milestones_released == campaign.milestones.len() {
             campaign.status = CampaignStatus::Completed;
+            Self::close_verifier_assignments(env, &campaign.verifiers);
             Self::bump_all_verifiers(env, &campaign.verifiers, |s| s.campaigns_completed += 1);
         }
         storage::save_campaign(env, &campaign);
@@ -1847,7 +2050,9 @@ impl Aidline {
         }
 
         campaign.status = CampaignStatus::Cancelled;
+        Self::settle_streams(&env, &mut campaign);
         storage::save_campaign(&env, &campaign);
+        Self::close_verifier_assignments(&env, &campaign.verifiers);
         Self::bump_all_verifiers(&env, &campaign.verifiers, |s| s.campaigns_cancelled += 1);
 
         CampaignCancelled { campaign_id }.publish(&env);
@@ -1883,7 +2088,9 @@ impl Aidline {
         }
 
         campaign.status = CampaignStatus::Cancelled;
+        Self::settle_streams(&env, &mut campaign);
         storage::save_campaign(&env, &campaign);
+        Self::close_verifier_assignments(&env, &campaign.verifiers);
         Self::bump_all_verifiers(&env, &campaign.verifiers, |s| s.campaigns_cancelled += 1);
 
         CampaignCancelledWithReason {
@@ -1944,9 +2151,17 @@ impl Aidline {
 
         if !ended && is_overdue {
             campaign.status = CampaignStatus::Cancelled;
+            Self::settle_streams(env, &mut campaign);
             storage::save_campaign(env, &campaign);
+            Self::close_verifier_assignments(env, &campaign.verifiers);
             Self::bump_all_verifiers(env, &campaign.verifiers, |s| s.campaigns_cancelled += 1);
             CampaignCancelled { campaign_id }.publish(env);
+        }
+
+        // A campaign that expired was never cancelled explicitly, so its streams
+        // are settled the first time a refund is taken (Issue #117).
+        if Self::settle_streams(env, &mut campaign) {
+            storage::save_campaign(env, &campaign);
         }
 
         let contributed = storage::contribution(env, campaign_id, donor);
@@ -2016,6 +2231,8 @@ impl Aidline {
         }
 
         let old_verifier = campaign.verifier.clone();
+        // The campaign moves from the old verifiers' bonds to the new one's.
+        Self::close_verifier_assignments(&env, &campaign.verifiers);
         campaign.verifier = new_verifier.clone();
         let mut verifiers = Vec::new(&env);
         verifiers.push_back(new_verifier.clone());
@@ -2023,6 +2240,7 @@ impl Aidline {
         campaign.threshold = 1;
         campaign.verifier_reassignments += 1;
         storage::save_campaign(&env, &campaign);
+        Self::open_verifier_assignments(&env, &campaign.verifiers);
         // Only the new verifier is assigned now; the old one keeps the record
         // of the campaign they held (Issue #119).
         Self::bump_verifier(&env, &new_verifier, |s| s.campaigns_assigned += 1);
@@ -2306,10 +2524,6 @@ impl Aidline {
         Ok(())
     }
 
-    /// Pays `amount` out of escrow to the campaign's beneficiary, or splits it
-    /// across its beneficiaries (Issue #116). Every share is rounded down and
-    /// the leftover goes to the first beneficiary, so the payments always sum to
-    /// exactly `amount`.
     /// Applies `update` to one verifier's track record (Issue #119).
     fn bump_verifier(env: &Env, who: &Address, update: impl FnOnce(&mut VerifierStats)) {
         let mut stats = storage::verifier_stats(env, who);
@@ -2332,6 +2546,10 @@ impl Aidline {
         Ok(())
     }
 
+    /// Pays `amount` out of escrow to the campaign's beneficiary, or splits it
+    /// across its beneficiaries (Issue #116). Every share is rounded down and
+    /// the leftover goes to the first beneficiary, so the payments always sum to
+    /// exactly `amount`.
     fn pay_beneficiaries(env: &Env, campaign: &Campaign, amount: i128) {
         let tok = token::Client::new(env, &campaign.token);
         let from = env.current_contract_address();
@@ -2365,6 +2583,85 @@ impl Aidline {
         }
     }
 
+    /// Cancels `campaign` if its cancel votes have reached the threshold after
+    /// the stall period (Issue #114).
+    fn cancel_by_vote(env: &Env, campaign: &mut Campaign) -> Result<(), Error> {
+        let base = campaign
+            .last_approval_time
+            .max(storage::campaign_start(env, campaign.id));
+        if base == 0 || env.ledger().timestamp() < base.saturating_add(STALL_PERIOD) {
+            return Err(Error::NotStalled);
+        }
+        let votes = storage::cancel_vote_total(env, campaign.id);
+        if votes <= 0 || votes * 10_000 < campaign.raised * CANCEL_VOTE_BPS {
+            return Err(Error::VoteThresholdNotReached);
+        }
+
+        campaign.status = CampaignStatus::Cancelled;
+        Self::settle_streams(env, campaign);
+        storage::save_campaign(env, campaign);
+        Self::close_verifier_assignments(env, &campaign.verifiers);
+        CampaignCancelled {
+            campaign_id: campaign.id,
+        }
+        .publish(env);
+        Ok(())
+    }
+
+    /// How much of `stream` has vested at the current ledger time.
+    fn vested(env: &Env, stream: &Stream) -> i128 {
+        if stream.duration == 0 {
+            return stream.total;
+        }
+        let elapsed = env.ledger().timestamp().saturating_sub(stream.start);
+        if elapsed >= stream.duration {
+            return stream.total;
+        }
+        stream
+            .total
+            .checked_mul(elapsed as i128)
+            .map(|scaled| scaled / stream.duration as i128)
+            .unwrap_or(stream.total)
+    }
+
+    /// Ends every running stream at its vested amount (Issue #117): the vested
+    /// part stays claimable by the beneficiary and the unvested part leaves
+    /// `released`, so it returns to the donors' refund pool. Returns whether
+    /// anything changed. Settled streams have `duration == 0` and are skipped.
+    fn settle_streams(env: &Env, campaign: &mut Campaign) -> bool {
+        let mut changed = false;
+        for index in 0..campaign.milestones_released {
+            if let Some(mut stream) = storage::stream(env, campaign.id, index)
+                && stream.duration > 0
+            {
+                let vested = Self::vested(env, &stream);
+                campaign.released -= stream.total - vested;
+                stream.total = vested;
+                stream.duration = 0;
+                storage::save_stream(env, campaign.id, index, &stream);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Counts a new campaign against each of its verifiers (Issue #129).
+    fn open_verifier_assignments(env: &Env, verifiers: &Vec<Address>) {
+        for verifier in verifiers.iter() {
+            let count = storage::active_campaigns(env, &verifier);
+            storage::set_active_campaigns(env, &verifier, count + 1);
+        }
+    }
+
+    /// Releases a campaign from each of its verifiers once it is completed or
+    /// cancelled, or moved to another verifier (Issue #129).
+    fn close_verifier_assignments(env: &Env, verifiers: &Vec<Address>) {
+        for verifier in verifiers.iter() {
+            let count = storage::active_campaigns(env, &verifier);
+            storage::set_active_campaigns(env, &verifier, count.saturating_sub(1));
+        }
+    }
+
     /// Pull pledge funds proportionally toward `milestone_amount`.
     ///
     /// Returns the total amount actually pulled from pledges.
@@ -2384,7 +2681,6 @@ impl Aidline {
         env: &Env,
         campaign_id: u64,
         milestone_amount: i128,
-        pledge_count: u64,
         campaign: &mut Campaign,
     ) -> i128 {
         let tok = token::Client::new(env, &campaign.token);
@@ -2393,17 +2689,22 @@ impl Aidline {
         // Phase 1: gather active pledges for this campaign.
         let mut active_pledges: Vec<Pledge> = Vec::new(env);
         let mut total_remaining: i128 = 0;
-        let mut i: u64 = 0;
-        while i < pledge_count {
-            if let Some(p) = storage::pledge(env, i)
-                && p.campaign_id == campaign_id
+        // Only this campaign's own pledge ids are read (#125). Pledges that are
+        // cancelled or fully pulled are dropped from the list so it stays short.
+        let pledge_ids = storage::campaign_pledges(env, campaign_id);
+        let mut still_open: Vec<u64> = Vec::new(env);
+        for pledge_id in pledge_ids.iter() {
+            if let Some(p) = storage::pledge(env, pledge_id)
                 && p.active
                 && p.pulled_amount < p.pledged_amount
             {
                 total_remaining += p.pledged_amount - p.pulled_amount;
+                still_open.push_back(pledge_id);
                 active_pledges.push_back(p);
             }
-            i += 1;
+        }
+        if still_open.len() != pledge_ids.len() {
+            storage::save_campaign_pledges(env, campaign_id, &still_open);
         }
         if total_remaining == 0 || active_pledges.is_empty() {
             return 0;

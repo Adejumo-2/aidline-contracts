@@ -46,6 +46,7 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) first for the roles, storage and lifecyc
 | Oversized metadata or proof URI bloats storage     | No length limit yet. See [issue #13](https://github.com/aidline-org/aidline-contracts/issues/13)                           | Open           |
 | Pledge allowance revoked to dodge a commitment     | Skipped without reverting, by design. Pledges are supplementary, not guaranteed funding                                    | Accepted       |
 | Storage entry expires on a long campaign           | TTLs are extended on every read and write. A very long campaign may need an off chain keeper                               | Open           |
+| Verifier goes silent and the creator and admin do nothing | Donors holding 50% of the raised amount can cancel after 14 days without progress (`vote_cancel`). Votes are weighted by contribution, so splitting a donation across addresses gains nothing | Mitigated      |
 | Admin key compromised                              | Single address today                                                                                                        | Open           |
 | Contract bug                                       | Unit tests, a fuzz target run in CI, and a bounded fuzz session on every pull request                                       | Audit required |
 

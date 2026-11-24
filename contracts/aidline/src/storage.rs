@@ -2,7 +2,7 @@ use soroban_sdk::{Address, Env, String, Vec};
 
 use crate::errors::Error;
 use crate::types::{
-    Beneficiary, Campaign, DataKey, Pledge, SponsorPool, VerifierBond, VerifierStats,
+    Beneficiary, Campaign, DataKey, Pledge, SponsorPool, Stream, VerifierBond, VerifierStats,
 };
 
 const DAY_IN_LEDGERS: u32 = 17_280;
@@ -320,11 +320,117 @@ pub fn next_pledge_id(env: &Env) -> u64 {
     id
 }
 
-pub fn next_pledge_id_peek(env: &Env) -> u64 {
-    env.storage()
-        .instance()
-        .get(&DataKey::PledgeCount)
-        .unwrap_or(0)
+/// Ids of the pledges made to `campaign_id`, so settling one campaign never
+/// reads another campaign's pledges (Issue #125).
+pub fn active_campaigns(env: &Env, who: &Address) -> u32 {
+    let key = DataKey::VerifierActiveCampaigns(who.clone());
+    let count: Option<u32> = env.storage().persistent().get(&key);
+    if count.is_some() {
+        bump(env, &key);
+    }
+    count.unwrap_or(0)
+}
+
+pub fn set_active_campaigns(env: &Env, who: &Address, count: u32) {
+    let key = DataKey::VerifierActiveCampaigns(who.clone());
+    if count == 0 {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, &count);
+        bump(env, &key);
+    }
+}
+
+pub fn milestone_stream_days(env: &Env, campaign_id: u64) -> Option<Vec<u32>> {
+    let key = DataKey::MilestoneStreamDays(campaign_id);
+    let days = env.storage().persistent().get(&key)?;
+    bump(env, &key);
+    Some(days)
+}
+
+pub fn set_milestone_stream_days(env: &Env, campaign_id: u64, days: &Vec<u32>) {
+    let key = DataKey::MilestoneStreamDays(campaign_id);
+    env.storage().persistent().set(&key, days);
+    bump(env, &key);
+}
+
+pub fn stream(env: &Env, campaign_id: u64, milestone_index: u32) -> Option<Stream> {
+    let key = DataKey::Stream(campaign_id, milestone_index);
+    let stream = env.storage().persistent().get(&key)?;
+    bump(env, &key);
+    Some(stream)
+}
+
+pub fn save_stream(env: &Env, campaign_id: u64, milestone_index: u32, stream: &Stream) {
+    let key = DataKey::Stream(campaign_id, milestone_index);
+    env.storage().persistent().set(&key, stream);
+    bump(env, &key);
+}
+
+pub fn campaign_start(env: &Env, campaign_id: u64) -> u64 {
+    let key = DataKey::CampaignStart(campaign_id);
+    let start: Option<u64> = env.storage().persistent().get(&key);
+    if start.is_some() {
+        bump(env, &key);
+    }
+    start.unwrap_or(0)
+}
+
+pub fn set_campaign_start(env: &Env, campaign_id: u64, timestamp: u64) {
+    let key = DataKey::CampaignStart(campaign_id);
+    env.storage().persistent().set(&key, &timestamp);
+    bump(env, &key);
+}
+
+pub fn cancel_vote(env: &Env, campaign_id: u64, donor: &Address) -> i128 {
+    let key = DataKey::CancelVote(campaign_id, donor.clone());
+    let weight: Option<i128> = env.storage().persistent().get(&key);
+    if weight.is_some() {
+        bump(env, &key);
+    }
+    weight.unwrap_or(0)
+}
+
+pub fn set_cancel_vote(env: &Env, campaign_id: u64, donor: &Address, weight: i128) {
+    let key = DataKey::CancelVote(campaign_id, donor.clone());
+    if weight == 0 {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, &weight);
+        bump(env, &key);
+    }
+}
+
+pub fn cancel_vote_total(env: &Env, campaign_id: u64) -> i128 {
+    let key = DataKey::CancelVoteTotal(campaign_id);
+    let total: Option<i128> = env.storage().persistent().get(&key);
+    if total.is_some() {
+        bump(env, &key);
+    }
+    total.unwrap_or(0)
+}
+
+pub fn set_cancel_vote_total(env: &Env, campaign_id: u64, total: i128) {
+    let key = DataKey::CancelVoteTotal(campaign_id);
+    env.storage().persistent().set(&key, &total);
+    bump(env, &key);
+}
+
+pub fn campaign_pledges(env: &Env, campaign_id: u64) -> Vec<u64> {
+    let key = DataKey::CampaignPledges(campaign_id);
+    match env.storage().persistent().get(&key) {
+        Some(ids) => {
+            bump(env, &key);
+            ids
+        }
+        None => Vec::new(env),
+    }
+}
+
+pub fn save_campaign_pledges(env: &Env, campaign_id: u64, ids: &Vec<u64>) {
+    let key = DataKey::CampaignPledges(campaign_id);
+    env.storage().persistent().set(&key, ids);
+    bump(env, &key);
 }
 
 pub fn pledge(env: &Env, pledge_id: u64) -> Option<Pledge> {
