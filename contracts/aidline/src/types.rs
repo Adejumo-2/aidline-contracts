@@ -98,6 +98,31 @@ pub struct SponsorPool {
     pub matched: i128,
 }
 
+/// Running record of a verifier's work, kept on chain (Issue #119). One fixed
+/// size entry per verifier, however many campaigns they have handled.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifierStats {
+    /// Campaigns this verifier has been assigned to, including by reassignment.
+    pub campaigns_assigned: u32,
+    /// Approvals this verifier has recorded for milestones.
+    pub milestones_approved: u32,
+    /// Campaigns that completed while this verifier was assigned.
+    pub campaigns_completed: u32,
+    /// Campaigns cancelled while this verifier was assigned.
+    pub campaigns_cancelled: u32,
+    /// Total bond amount slashed from this verifier.
+    pub total_slashed: i128,
+}
+
+/// One recipient of a split payout and its share in basis points (Issue #116).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Beneficiary {
+    pub to: Address,
+    pub bps: u32,
+}
+
 /// Bond status for verifier bond accounting (Issue #29).
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -178,4 +203,10 @@ pub enum DataKey {
     CampaignDonors(u64),
     // Issue #128: donated amount not yet matched by a sponsor, per campaign and donor
     UnmatchedDonation(u64, Address),
+    // Issue #116: beneficiaries of a split-payout campaign
+    Beneficiaries(u64),
+    // Issue #118: version of the stored data layout (instance storage)
+    SchemaVersion,
+    // Issue #119: per-verifier track record
+    VerifierStats(Address),
 }

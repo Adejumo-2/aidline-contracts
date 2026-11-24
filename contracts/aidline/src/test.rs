@@ -433,6 +433,48 @@ fn expired_campaign_allows_refund_and_blocks_activity() {
     assert_eq!(s.token.balance(&donor), 1000);
 }
 
+#[test]
+fn refund_pro_rata_overflow_returns_invalid_amount() {
+    let s = Setup::new();
+    let half_max = i128::MAX / 2;
+    let milestones = vec![&s.env, half_max, half_max];
+    let id = s.client.create_campaign(
+        &s.creator,
+        &s.beneficiary,
+        &s.verifier,
+        &s.token.address,
+        &CampaignKind::Emergency,
+        &String::from_str(&s.env, "ipfs://overflow-refund"),
+        &(s.env.ledger().timestamp() + 30 * DAY),
+        &milestones,
+    );
+
+    let donor1 = s.donor(half_max);
+    let donor2 = s.donor(1);
+
+    s.client.donate(&donor1, &id, &half_max);
+    s.client.donate(&donor2, &id, &1);
+
+    s.client.cancel_campaign(&s.creator, &id);
+
+    // donor1: contributed = half_max, unreleased = half_max + 1.
+    // contributed * unreleased overflows i128::MAX -> returns Err(Ok(Error::InvalidAmount))
+    assert_eq!(
+        s.client.try_refund(&donor1, &id),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert_eq!(
+        s.client.try_refund_for(&donor1, &id),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert_eq!(s.client.refundable_amount(&id, &donor1), 0);
+
+    // donor2: contributed = 1, unreleased = half_max + 1.
+    // 1 * (half_max + 1) does not overflow -> succeeds
+    let refunded2 = s.client.refund(&donor2, &id);
+    assert_eq!(refunded2, 1);
+}
+
 // ─── refund_for tests ────────────────────────────────────────────────────────
 
 #[test]
@@ -616,6 +658,32 @@ fn missing_campaign_errors() {
 }
 
 // ─── Issue #23 Tests: Emergency fast track ────────────────────────────────────
+
+#[test]
+fn emergency_fast_track_cap_overflow_returns_invalid_amount() {
+    let s = Setup::new();
+    let large_goal = i128::MAX / 1000;
+    let milestones = vec![&s.env, large_goal];
+    let id = s.client.create_campaign(
+        &s.creator,
+        &s.beneficiary,
+        &s.verifier,
+        &s.token.address,
+        &CampaignKind::Emergency,
+        &String::from_str(&s.env, "ipfs://overflow-goal"),
+        &(s.env.ledger().timestamp() + 30 * DAY),
+        &milestones,
+    );
+
+    let donor = s.donor(1_000);
+    s.client.donate(&donor, &id, &500);
+
+    // Calling emergency_fast_track with an extreme goal overflows cap calculation and returns InvalidAmount
+    assert_eq!(
+        s.client.try_emergency_fast_track(&id),
+        Err(Ok(Error::InvalidAmount))
+    );
+}
 
 #[test]
 fn emergency_fast_track_works_for_emergency_campaign() {
@@ -2013,6 +2081,60 @@ fn pledge_pulls_never_push_raised_past_the_goal() {
 }
 
 #[test]
+fn pledge_pull_overflow_skips_pledge_safely() {
+    let s = Setup::new();
+    let milestone_val = i128::MAX / 10;
+    let milestones = vec![&s.env, milestone_val];
+    let id = s.client.create_campaign(
+        &s.creator,
+        &s.beneficiary,
+        &s.verifier,
+        &s.token.address,
+        &CampaignKind::Emergency,
+        &String::from_str(&s.env, "ipfs://overflow-pledge"),
+        &(s.env.ledger().timestamp() + 30 * DAY),
+        &milestones,
+    );
+
+    let donor_overflow = s.donor(i128::MAX / 2);
+    let donor_normal = s.donor(1_000);
+    let donor_direct = s.donor(milestone_val);
+    let expiry = s.env.ledger().sequence() + 1_000;
+
+    let pledge_large = i128::MAX / 2;
+    s.token
+        .approve(&donor_overflow, &s.client.address, &pledge_large, &expiry);
+    s.token
+        .approve(&donor_normal, &s.client.address, &5, &expiry);
+
+    let pid_overflow = s.client.create_pledge(&donor_overflow, &id, &pledge_large);
+    let pid_normal = s.client.create_pledge(&donor_normal, &id, &5);
+
+    // Direct donation covers milestone so that approval can succeed even if pledges are skipped
+    s.client.donate(&donor_direct, &id, &milestone_val);
+
+    // Initial balances
+    assert_eq!(s.token.balance(&donor_overflow), pledge_large);
+    assert_eq!(s.token.balance(&donor_normal), 1_000);
+
+    // Approve milestone: milestone_val * pledge_large overflows i128::MAX.
+    // Instead of falling back to i128::MAX and draining donor_overflow,
+    // it skips donor_overflow safely.
+    s.client.approve_milestone(&id, &s.proof());
+
+    // donor_overflow was safely skipped - balance untouched and pulled_amount is 0
+    assert_eq!(s.token.balance(&donor_overflow), pledge_large);
+    assert_eq!(s.client.get_pledge(&pid_overflow).unwrap().pulled_amount, 0);
+
+    // donor_normal (5 tokens) does not overflow and was processed
+    let pledge_normal = s.client.get_pledge(&pid_normal).unwrap();
+    assert_eq!(
+        s.token.balance(&donor_normal),
+        1_000 - pledge_normal.pulled_amount
+    );
+}
+
+#[test]
 fn donor_can_cancel_pledge() {
     let s = Setup::new();
     let id = s.campaign();
@@ -2823,6 +2945,66 @@ fn create_campaign_with_due_dates_validates_future_and_monotonicity() {
     );
     assert_eq!(s.client.campaign_count(), count_before + 1);
     assert_eq!(s.client.milestone_due_dates(&res), valid_dates);
+}
+
+#[test]
+fn create_campaign_with_due_dates_rejects_due_dates_exceeding_deadline() {
+    let s = Setup::new();
+    let now = s.env.ledger().timestamp();
+    let milestones = vec![&s.env, 300, 700];
+
+    let count_before = s.client.campaign_count();
+
+    // 1. Due date exceeding deadline (deadline = now + 10 * DAY, due_date = now + 15 * DAY) fails
+    let late_dates = vec![&s.env, now + 5 * DAY, now + 15 * DAY];
+    assert_eq!(
+        s.client.try_create_campaign_with_due_dates(
+            &s.creator,
+            &s.beneficiary,
+            &s.verifier,
+            &s.token.address,
+            &CampaignKind::Emergency,
+            &String::from_str(&s.env, "ipfs://late-due"),
+            &(now + 10 * DAY),
+            &milestones,
+            &late_dates,
+        ),
+        Err(Ok(Error::InvalidMilestones))
+    );
+
+    // 2. Due date = deadline + 1 fails
+    let deadline = now + 10 * DAY;
+    let over_by_one = vec![&s.env, now + 5 * DAY, deadline + 1];
+    assert_eq!(
+        s.client.try_create_campaign_with_due_dates(
+            &s.creator,
+            &s.beneficiary,
+            &s.verifier,
+            &s.token.address,
+            &CampaignKind::Emergency,
+            &String::from_str(&s.env, "ipfs://over-by-one"),
+            &deadline,
+            &milestones,
+            &over_by_one,
+        ),
+        Err(Ok(Error::InvalidMilestones))
+    );
+
+    // 3. Due date equal to deadline succeeds
+    let exact_deadline_dates = vec![&s.env, now + 5 * DAY, deadline];
+    let res = s.client.create_campaign_with_due_dates(
+        &s.creator,
+        &s.beneficiary,
+        &s.verifier,
+        &s.token.address,
+        &CampaignKind::Emergency,
+        &String::from_str(&s.env, "ipfs://exact-deadline-due"),
+        &deadline,
+        &milestones,
+        &exact_deadline_dates,
+    );
+    assert_eq!(s.client.campaign_count(), count_before + 1);
+    assert_eq!(s.client.milestone_due_dates(&res), exact_deadline_dates);
 }
 
 #[test]
@@ -4795,3 +4977,460 @@ fn test_accounting_invariants_across_random_call_sequences() {
         }
     }
 }
+
+// ─── Issue #110: persistent keys are extended ────────────────────────────────
+
+mod ttl {
+    use super::*;
+    use crate::storage::{INSTANCE_THRESHOLD, PERSISTENT_THRESHOLD};
+    use crate::types::DataKey;
+    use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
+
+    /// Remaining TTL, in ledgers, of a persistent key. Read through the test
+    /// environment; it panics if the key does not exist.
+    fn ttl(s: &Setup, key: &DataKey) -> u32 {
+        s.env
+            .as_contract(&s.client.address, || s.env.storage().persistent().get_ttl(key))
+    }
+
+    fn assert_extended(s: &Setup, key: DataKey) {
+        let remaining = ttl(s, &key);
+        assert!(
+            remaining >= PERSISTENT_THRESHOLD,
+            "{key:?} has only {remaining} ledgers left"
+        );
+    }
+
+    /// A fresh entry in the test environment starts with a few thousand ledgers
+    /// of TTL, so only an explicit `extend_ttl` on the write path can lift it
+    /// to the threshold. Covers every persistent `DataKey` variant; the instance
+    /// keys (`Admin`, `Token`, `CampaignCount`, `Paused`, `PlatformFee`,
+    /// `Treasury`, `PendingAdmin`, `BondRequirement`, `BondWithdrawDelay`,
+    /// `PledgeCount`) live in the instance entry, checked separately below.
+    #[test]
+    fn every_persistent_key_is_extended_by_the_call_that_writes_it() {
+        let s = Setup::new();
+        let id = s.campaign();
+        assert_extended(&s, DataKey::Campaign(id));
+        assert_extended(&s, DataKey::Verifier(s.verifier.clone()));
+        assert_extended(&s, DataKey::AllowedToken(s.token.address.clone()));
+
+        let donor = s.donor(1_000);
+        s.client.donate(&donor, &id, &300);
+        assert_extended(&s, DataKey::Contribution(id, donor.clone()));
+        assert_extended(&s, DataKey::CampaignDonors(id));
+
+        let sponsor = s.donor(1_000);
+        s.client.deposit_sponsor_pool(&sponsor, &id, &5_000, &500, &500);
+        assert_extended(&s, DataKey::SponsorPool(id, sponsor.clone()));
+
+        let pledger = s.donor(500);
+        let expiry = s.env.ledger().sequence() + 1_000;
+        s.token.approve(&pledger, &s.client.address, &200, &expiry);
+        let pledge_id = s.client.create_pledge(&pledger, &id, &200);
+        assert_extended(&s, DataKey::Pledge(pledge_id));
+
+        let bonded = s.bonded_verifier(1_000, 100);
+        assert_extended(&s, DataKey::VerifierBond(bonded.clone()));
+        s.client
+            .set_verifier_profile(&bonded, &String::from_str(&s.env, "ipfs://profile"));
+        assert_extended(&s, DataKey::VerifierProfile(bonded));
+
+        let due_id = s.client.create_campaign_with_due_dates(
+            &s.creator,
+            &s.beneficiary,
+            &s.verifier,
+            &s.token.address,
+            &CampaignKind::Emergency,
+            &String::from_str(&s.env, "ipfs://due"),
+            &(s.env.ledger().timestamp() + 30 * DAY),
+            &vec![&s.env, 300, 300, 400],
+            &vec![
+                &s.env,
+                s.env.ledger().timestamp() + 10 * DAY,
+                s.env.ledger().timestamp() + 20 * DAY,
+                s.env.ledger().timestamp() + 25 * DAY,
+            ],
+        );
+        assert_extended(&s, DataKey::MilestoneDueDates(due_id));
+
+        s.client.donate(&donor, &id, &700);
+        s.client.approve_milestone(&id, &s.proof());
+        assert_extended(&s, DataKey::MilestoneApprovals(id, 0));
+    }
+
+    /// Reading an entry also keeps it alive: advance the ledger until the
+    /// entry is inside the extension window, read it through a view, and check
+    /// the TTL went back up. Only calls that do not touch the token contract
+    /// are made after the jump, because the token's own entries are not ours
+    /// to extend.
+    #[test]
+    fn reads_of_verifier_contribution_and_allowlist_extend_their_entries() {
+        let s = Setup::new();
+        let id = s.campaign();
+        let donor = s.donor(1_000);
+        s.client.donate(&donor, &id, &300);
+
+        s.env
+            .ledger()
+            .set_sequence_number(s.env.ledger().sequence() + 10 * 17_280);
+
+        let verifier_key = DataKey::Verifier(s.verifier.clone());
+        let contribution_key = DataKey::Contribution(id, donor.clone());
+        let allowed_key = DataKey::AllowedToken(s.token.address.clone());
+        for key in [&verifier_key, &contribution_key, &allowed_key] {
+            assert!(ttl(&s, key) < PERSISTENT_THRESHOLD, "{key:?} should be due");
+        }
+
+        assert!(s.client.is_verifier(&s.verifier));
+        assert_eq!(s.client.contribution_of(&id, &donor), 300);
+        assert!(s.client.is_token_allowed(&s.token.address));
+
+        assert_extended(&s, verifier_key);
+        assert_extended(&s, contribution_key);
+        assert_extended(&s, allowed_key);
+    }
+
+    /// The instance entry (admin, token, counters, fees) is extended by every
+    /// campaign call, not only by the constructor and `create_campaign`.
+    #[test]
+    fn campaign_calls_extend_the_instance_entry() {
+        let s = Setup::new();
+        let id = s.campaign();
+
+        s.env
+            .ledger()
+            .set_sequence_number(s.env.ledger().sequence() + 5 * 17_280);
+        let before = s
+            .env
+            .as_contract(&s.client.address, || s.env.storage().instance().get_ttl());
+        assert!(before < INSTANCE_THRESHOLD);
+
+        s.client.get_campaign(&id);
+        let after = s
+            .env
+            .as_contract(&s.client.address, || s.env.storage().instance().get_ttl());
+        assert!(after >= INSTANCE_THRESHOLD, "instance left with {after} ledgers");
+    }
+}
+
+// ─── Issue #116: split payouts ───────────────────────────────────────────────
+
+mod split_payouts {
+    use super::*;
+    use crate::Beneficiary;
+
+    fn split_campaign(s: &Setup, shares: &[(Address, u32)]) -> u64 {
+        let mut list = vec![&s.env];
+        for (to, bps) in shares {
+            list.push_back(Beneficiary {
+                to: to.clone(),
+                bps: *bps,
+            });
+        }
+        s.client.create_campaign_with_beneficiaries(
+            &s.creator,
+            &list,
+            &s.verifier,
+            &s.token.address,
+            &CampaignKind::Emergency,
+            &String::from_str(&s.env, "ipfs://split"),
+            &(s.env.ledger().timestamp() + 30 * DAY),
+            &vec![&s.env, 300, 300, 400],
+        )
+    }
+
+    #[test]
+    fn milestone_payout_is_split_and_rounding_dust_goes_to_the_first_beneficiary() {
+        let s = Setup::new();
+        let (a, b, c) = (
+            Address::generate(&s.env),
+            Address::generate(&s.env),
+            Address::generate(&s.env),
+        );
+        let id = split_campaign(&s, &[(a.clone(), 3_333), (b.clone(), 3_333), (c.clone(), 3_334)]);
+        let donor = s.donor(1_000);
+        s.client.donate(&donor, &id, &1_000);
+
+        s.client.approve_milestone(&id, &s.proof());
+
+        // 300 splits into 99, 99 and 100; the 2 left over go to the first.
+        assert_eq!(s.token.balance(&a), 101);
+        assert_eq!(s.token.balance(&b), 99);
+        assert_eq!(s.token.balance(&c), 100);
+        assert_eq!(
+            s.token.balance(&a) + s.token.balance(&b) + s.token.balance(&c),
+            300
+        );
+        assert!(!s.env.events().all().events().is_empty());
+        assert_eq!(s.client.get_beneficiaries(&id).len(), 3);
+    }
+
+    #[test]
+    fn emergency_advance_is_split_across_beneficiaries() {
+        let s = Setup::new();
+        let (a, b, c) = (
+            Address::generate(&s.env),
+            Address::generate(&s.env),
+            Address::generate(&s.env),
+        );
+        let id = split_campaign(&s, &[(a.clone(), 3_333), (b.clone(), 3_333), (c.clone(), 3_334)]);
+        let donor = s.donor(500);
+        s.client.donate(&donor, &id, &300);
+
+        // 20% of the 1000 goal is 200: 66 + 66 + 66 plus 2 of dust to the first.
+        assert_eq!(s.client.emergency_fast_track(&id), 200);
+        assert_eq!(s.token.balance(&a), 68);
+        assert_eq!(s.token.balance(&b), 66);
+        assert_eq!(s.token.balance(&c), 66);
+    }
+
+    #[test]
+    fn shares_must_sum_to_10_000_and_addresses_must_be_distinct() {
+        let s = Setup::new();
+        let (a, b) = (Address::generate(&s.env), Address::generate(&s.env));
+        let try_create = |s: &Setup, shares: &[(Address, u32)]| {
+            let mut list = vec![&s.env];
+            for (to, bps) in shares {
+                list.push_back(Beneficiary {
+                    to: to.clone(),
+                    bps: *bps,
+                });
+            }
+            s.client.try_create_campaign_with_beneficiaries(
+                &s.creator,
+                &list,
+                &s.verifier,
+                &s.token.address,
+                &CampaignKind::Emergency,
+                &String::from_str(&s.env, "ipfs://bad"),
+                &(s.env.ledger().timestamp() + 30 * DAY),
+                &vec![&s.env, 300, 300, 400],
+            )
+        };
+        assert!(try_create(&s, &[(a.clone(), 10_000)]).is_ok());
+        assert_eq!(
+            try_create(&s, &[(a.clone(), 5_000), (b.clone(), 4_000)]),
+            Err(Ok(Error::InvalidBeneficiaries))
+        );
+        assert_eq!(
+            try_create(&s, &[(a.clone(), 6_000), (b.clone(), 5_000)]),
+            Err(Ok(Error::InvalidBeneficiaries))
+        );
+        assert_eq!(
+            try_create(&s, &[(a.clone(), 5_000), (a.clone(), 5_000)]),
+            Err(Ok(Error::InvalidBeneficiaries))
+        );
+        assert_eq!(
+            try_create(&s, &[(a.clone(), 0), (b.clone(), 10_000)]),
+            Err(Ok(Error::InvalidBeneficiaries))
+        );
+        assert_eq!(try_create(&s, &[]), Err(Ok(Error::InvalidBeneficiaries)));
+    }
+
+    #[test]
+    fn the_verifier_cannot_be_a_beneficiary() {
+        let s = Setup::new();
+        let other = Address::generate(&s.env);
+        let mut list = vec![&s.env];
+        list.push_back(Beneficiary {
+            to: other,
+            bps: 5_000,
+        });
+        list.push_back(Beneficiary {
+            to: s.verifier.clone(),
+            bps: 5_000,
+        });
+        assert_eq!(
+            s.client.try_create_campaign_with_beneficiaries(
+                &s.creator,
+                &list,
+                &s.verifier,
+                &s.token.address,
+                &CampaignKind::Emergency,
+                &String::from_str(&s.env, "ipfs://conflict"),
+                &(s.env.ledger().timestamp() + 30 * DAY),
+                &vec![&s.env, 300, 300, 400],
+            ),
+            Err(Ok(Error::ConflictOfInterest))
+        );
+    }
+
+    #[test]
+    fn a_single_beneficiary_campaign_still_pays_the_beneficiary_directly() {
+        let s = Setup::new();
+        let id = s.campaign();
+        let donor = s.donor(1_000);
+        s.client.donate(&donor, &id, &1_000);
+        s.client.approve_milestone(&id, &s.proof());
+
+        assert_eq!(s.token.balance(&s.beneficiary), 300);
+        let single = s.client.get_beneficiaries(&id);
+        assert_eq!(single.len(), 1);
+        assert_eq!(single.get(0).unwrap().bps, 10_000);
+    }
+}
+
+// ─── Issue #118: schema versioning ───────────────────────────────────────────
+
+mod schema {
+    use super::*;
+    use crate::types::DataKey;
+    use crate::SCHEMA_VERSION;
+
+    /// Rewrites the stored state as an older build (before versioning) left it.
+    fn downgrade_to_unversioned(s: &Setup) {
+        s.env.as_contract(&s.client.address, || {
+            s.env.storage().instance().remove(&DataKey::SchemaVersion);
+        });
+    }
+
+    #[test]
+    fn fresh_deploys_start_at_the_current_version() {
+        let s = Setup::new();
+        assert_eq!(s.client.schema_version(), SCHEMA_VERSION);
+        let id = s.campaign();
+        let donor = s.donor(100);
+        s.client.donate(&donor, &id, &100);
+    }
+
+    #[test]
+    fn calls_fail_while_a_migration_is_pending_and_migrate_fixes_it() {
+        let s = Setup::new();
+        let id = s.campaign();
+        let donor = s.donor(1_000);
+        s.client.donate(&donor, &id, &100);
+
+        downgrade_to_unversioned(&s);
+        assert_eq!(s.client.schema_version(), 0);
+
+        // State-changing entry points refuse to run, reads still work.
+        assert_eq!(
+            s.client.try_donate(&donor, &id, &100),
+            Err(Ok(Error::MigrationPending))
+        );
+        assert_eq!(
+            s.client.try_create_campaign(
+                &s.creator,
+                &s.beneficiary,
+                &s.verifier,
+                &s.token.address,
+                &CampaignKind::Emergency,
+                &String::from_str(&s.env, "ipfs://pending"),
+                &(s.env.ledger().timestamp() + 30 * DAY),
+                &vec![&s.env, 300, 300, 400],
+            ),
+            Err(Ok(Error::MigrationPending))
+        );
+        assert_eq!(s.client.get_campaign(&id).raised, 100);
+
+        // The old data survives the migration untouched.
+        assert_eq!(s.client.migrate(), SCHEMA_VERSION);
+        assert!(!s.env.events().all().events().is_empty(), "Migrated event");
+        assert_eq!(s.client.schema_version(), SCHEMA_VERSION);
+        assert_eq!(s.client.get_campaign(&id).raised, 100);
+        assert_eq!(s.client.donate(&donor, &id, &100), 100);
+        assert_eq!(s.client.get_campaign(&id).raised, 200);
+    }
+
+    #[test]
+    fn migrate_is_idempotent_and_admin_only() {
+        let s = Setup::new();
+        let id = s.campaign();
+        let before = s.client.get_campaign(&id);
+
+        assert_eq!(s.client.migrate(), SCHEMA_VERSION);
+        assert_eq!(s.client.migrate(), SCHEMA_VERSION);
+        assert!(!s.env.events().all().events().is_empty(), "Migrated event");
+        assert_eq!(s.client.get_campaign(&id), before);
+
+        downgrade_to_unversioned(&s);
+        assert!(s.client.mock_auths(&[]).try_migrate().is_err());
+        assert_eq!(s.client.schema_version(), 0);
+    }
+}
+
+// ─── Issue #119: verifier track record ───────────────────────────────────────
+
+mod verifier_track_record {
+    use super::*;
+
+    #[test]
+    fn assigned_approved_and_completed_counters_follow_a_campaign() {
+        let s = Setup::new();
+        let empty = s.client.verifier_stats(&s.verifier);
+        assert_eq!(empty.campaigns_assigned, 0);
+
+        let id = s.campaign();
+        assert_eq!(s.client.verifier_stats(&s.verifier).campaigns_assigned, 1);
+
+        let donor = s.donor(1_000);
+        s.client.donate(&donor, &id, &1_000);
+        s.client.approve_milestone(&id, &s.proof());
+        s.client.approve_milestone(&id, &s.proof());
+        let mid = s.client.verifier_stats(&s.verifier);
+        assert_eq!(mid.milestones_approved, 2);
+        assert_eq!(mid.campaigns_completed, 0);
+
+        s.client.approve_milestone(&id, &s.proof());
+        let done = s.client.verifier_stats(&s.verifier);
+        assert_eq!(done.milestones_approved, 3);
+        assert_eq!(done.campaigns_completed, 1);
+        assert_eq!(done.campaigns_cancelled, 0);
+    }
+
+    #[test]
+    fn cancelling_counts_against_the_assigned_verifier() {
+        let s = Setup::new();
+        let id = s.campaign();
+        s.client.cancel_campaign(&s.creator, &id);
+        let second = s.campaign();
+        s.client.cancel_campaign_with_reason(
+            &s.creator,
+            &second,
+            &String::from_str(&s.env, "ipfs://why"),
+        );
+
+        let stats = s.client.verifier_stats(&s.verifier);
+        assert_eq!(stats.campaigns_assigned, 2);
+        assert_eq!(stats.campaigns_cancelled, 2);
+        assert_eq!(stats.campaigns_completed, 0);
+    }
+
+    #[test]
+    fn a_reassigned_campaign_counts_for_the_verifier_who_held_it() {
+        let s = Setup::new();
+        let id = s.campaign();
+        let donor = s.donor(1_000);
+        s.client.donate(&donor, &id, &1_000);
+        s.client.approve_milestone(&id, &s.proof());
+
+        let second = Address::generate(&s.env);
+        s.client.add_verifier(&second);
+        s.client.reassign_verifier(&id, &second);
+
+        // The original verifier keeps what they did; the new one is assigned.
+        let first = s.client.verifier_stats(&s.verifier);
+        assert_eq!(first.campaigns_assigned, 1);
+        assert_eq!(first.milestones_approved, 1);
+        assert_eq!(s.client.verifier_stats(&second).campaigns_assigned, 1);
+
+        // Events after the handover count for the new verifier only.
+        s.client.cancel_campaign(&s.creator, &id);
+        assert_eq!(s.client.verifier_stats(&second).campaigns_cancelled, 1);
+        assert_eq!(s.client.verifier_stats(&s.verifier).campaigns_cancelled, 0);
+    }
+
+    #[test]
+    fn slashes_add_up_in_total_slashed() {
+        let s = Setup::new();
+        let v = s.bonded_verifier(1_000, 400);
+        let id = s.campaign();
+
+        s.client.slash_verifier(&v, &id, &150);
+        s.client.slash_verifier(&v, &id, &50);
+        assert_eq!(s.client.verifier_stats(&v).total_slashed, 200);
+        assert_eq!(s.client.verifier_stats(&s.verifier).total_slashed, 0);
+    }
+}
+

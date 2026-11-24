@@ -340,3 +340,14 @@ Emitted when the campaign creator grants a one-time deadline extension.
 - **Topics**: `(symbol_short!("dl_ext"), campaign_id: u64)`
 - **Data**: `(old_deadline: u64, new_deadline: u64)`
 - **Emitted by**: `extend_deadline`
+
+### 31. `BeneficiaryPaid`
+Emitted once per recipient when a split-payout campaign pays out a milestone or the emergency advance (#116).
+- **Fields in code**:
+  1. `campaign_id: u64`
+  2. `recipient: Address`
+  3. `amount: i128`
+- **Topics**: `(symbol_short!("paid"), campaign_id: u64, recipient: Address)`
+- **Data**: `amount: i128`
+- **Emitted by**: `approve_milestone`, `approve_milestone_multisig`, `emergency_fast_track` (split-payout campaigns only)
+
