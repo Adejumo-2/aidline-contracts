@@ -80,4 +80,10 @@ pub enum Error {
 
     // Milestone due date
     MilestoneOverdue = 42,
+
+    // Split payouts
+    InvalidBeneficiaries = 48,
+
+    // Storage schema versioning
+    MigrationPending = 49,
 }

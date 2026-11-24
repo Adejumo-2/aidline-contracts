@@ -21,11 +21,12 @@ use soroban_sdk::{
 
 pub use errors::Error;
 pub use types::{
-    BondStatus, Campaign, CampaignKind, CampaignStatus, Pledge, SponsorPool, VerifierBond,
+    Beneficiary, BondStatus, Campaign, CampaignKind, CampaignStatus, Pledge, SponsorPool,
+    VerifierBond, VerifierStats,
 };
 
 use events::{
-    AdminAccepted, AdminChanged, AdminProposed, BondSlashed, BondWithdrawn, CampaignCancelled,
+    AdminAccepted, AdminChanged, AdminProposed, BeneficiaryPaid, BondSlashed, Migrated, BondWithdrawn, CampaignCancelled,
     CampaignCancelledWithReason, CampaignCreated, ContractPaused, ContractUnpaused,
     ContractUpgraded, DeadlineExtended, Donated, EmergencyAdvanceReleased, MatchingApplied,
     MetadataUpdated, MilestoneApproved, MilestoneRejected, MilestoneReleased, PlatformFeeUpdated,
@@ -46,12 +47,21 @@ const MAX_PLATFORM_FEE_BPS: u32 = 200;
 const SKIP_REASON_NO_ALLOWANCE: u32 = 1;
 /// Reason code emitted in PledgeSkipped when the pledge is fully consumed.
 const SKIP_REASON_EXHAUSTED: u32 = 2;
+/// Reason code emitted in PledgeSkipped when multiplication overflows.
+const SKIP_REASON_OVERFLOW: u32 = 3;
 
 /// Maximum duration (in seconds) for a one-time deadline extension (30 days).
 const MAX_DEADLINE_EXTENSION: u64 = 30 * 86_400;
 
 /// Maximum number of times a campaign's verifier may be reassigned.
 pub const MAX_VERIFIER_REASSIGNMENTS: u32 = 2;
+
+/// Version of the stored data layout this build reads and writes (Issue #118).
+/// Bump it when a stored struct changes and add the step to `migrate`.
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// Most beneficiaries a split-payout campaign may name (Issue #116).
+pub const MAX_BENEFICIARIES: u32 = 10;
 /// Maximum page limit for paginated donor enumeration.
 const MAX_DONORS_PAGE_LIMIT: u32 = 50;
 
@@ -77,6 +87,7 @@ impl Aidline {
         storage::set_admin(&env, &admin);
         storage::set_token(&env, &token);
         storage::set_token_allowed(&env, &token, true);
+        storage::set_schema_version(&env, SCHEMA_VERSION);
         storage::bump_instance(&env);
     }
 
@@ -286,6 +297,44 @@ impl Aidline {
         ContractUpgraded { new_wasm_hash }.publish(&env);
     }
 
+    // ─── Storage schema (Issue #118) ──────────────────────────────────────────
+
+    /// Returns the version of the stored data layout. `0` means the data was
+    /// written before versioning existed and [`migrate`] has not run yet.
+    pub fn schema_version(env: Env) -> u32 {
+        storage::schema_version(&env)
+    }
+
+    /// Upgrades stored data to [`SCHEMA_VERSION`], one version at a time, and
+    /// returns the resulting version.
+    ///
+    /// Only the admin may call this. Until it has run after an upgrade that
+    /// raised [`SCHEMA_VERSION`], the state-changing entry points fail with
+    /// [`Error::MigrationPending`]. Calling it when nothing is pending changes
+    /// nothing. Emits [`Migrated`] on every call.
+    ///
+    /// # Errors
+    /// - [`Error::Unauthorized`]: caller is not the admin.
+    pub fn migrate(env: Env) -> u32 {
+        storage::admin(&env).require_auth();
+        let from = storage::schema_version(&env);
+        let mut version = from;
+        while version < SCHEMA_VERSION {
+            // Each arm upgrades the stored data from `version` to `version + 1`.
+            match version {
+                // 0 -> 1: the layout is unchanged; this step only marks the
+                // existing data as versioned.
+                0 => {}
+                _ => {}
+            }
+            version += 1;
+        }
+        storage::set_schema_version(&env, version);
+        storage::bump_instance(&env);
+        Migrated { from, to: version }.publish(&env);
+        version
+    }
+
     // ─── Platform Fee and Treasury (admin only) ───────────────────────────────
 
     /// Sets the platform fee in basis points.
@@ -399,6 +448,7 @@ impl Aidline {
     ///   or is zero.
     /// - [`Error::Unauthorized`]: `verifier` is already registered.
     pub fn register_with_bond(env: Env, verifier: Address, bond_amount: i128) -> Result<(), Error> {
+        Self::ensure_current_schema(&env)?;
         verifier.require_auth();
 
         let required = storage::bond_requirement(&env);
@@ -571,6 +621,7 @@ impl Aidline {
             bond.status = BondStatus::Slashed;
         }
         storage::save_verifier_bond(&env, &bond);
+        Self::bump_verifier(&env, &verifier, |s| s.total_slashed += slash_amount);
 
         let recovery = storage::slashed_recovery(&env, campaign_id);
         storage::set_slashed_recovery(&env, campaign_id, recovery + slash_amount);
@@ -786,6 +837,7 @@ impl Aidline {
         min_donation: i128,
         approval_cooldown: u64,
     ) -> Result<u64, Error> {
+        Self::ensure_current_schema(&env)?;
         creator.require_auth();
         storage::bump_instance(&env);
 
@@ -863,6 +915,7 @@ impl Aidline {
             last_approval_time: 0,
         };
         storage::save_campaign(&env, &campaign);
+        Self::bump_all_verifiers(&env, &campaign.verifiers, |s| s.campaigns_assigned += 1);
 
         CampaignCreated {
             campaign_id: id,
@@ -880,7 +933,8 @@ impl Aidline {
     ///
     /// # Errors
     /// - [`Error::InvalidMilestones`]: `milestone_due_dates` length does not match
-    ///   `milestones` length, or due dates are not strictly monotonically increasing.
+    ///   `milestones` length, due dates are not strictly monotonically increasing,
+    ///   or a due date exceeds `deadline`.
     /// - [`Error::DeadlineInPast`]: a milestone due date is not in the future.
     pub fn create_campaign_with_due_dates(
         env: Env,
@@ -907,6 +961,9 @@ impl Aidline {
             if i > 0 && due_date <= prev_due {
                 return Err(Error::InvalidMilestones);
             }
+            if due_date > deadline {
+                return Err(Error::InvalidMilestones);
+            }
             prev_due = due_date;
         }
 
@@ -923,6 +980,93 @@ impl Aidline {
         )?;
         storage::set_milestone_due_dates(&env, id, &milestone_due_dates);
         Ok(id)
+    }
+
+    /// Creates a campaign whose payouts are split across several beneficiaries
+    /// and returns its ID (Issue #116).
+    ///
+    /// `beneficiaries` lists each recipient with a share in basis points; the
+    /// shares must sum to 10,000, be positive and name distinct addresses, and
+    /// the verifier cannot be one of them. Each payout (milestone or emergency
+    /// advance) gives every beneficiary `amount * bps / 10_000`, rounded down,
+    /// with the rounding dust going to the first beneficiary, and emits
+    /// [`BeneficiaryPaid`] per recipient. With a single beneficiary this is
+    /// the same as [`create_campaign`]. Other arguments and errors are those of
+    /// [`create_campaign`].
+    ///
+    /// # Errors
+    /// - [`Error::InvalidBeneficiaries`]: the list is empty, longer than
+    ///   [`MAX_BENEFICIARIES`], has a zero share, repeats an address, or its
+    ///   shares do not sum to 10,000.
+    /// - [`Error::ConflictOfInterest`]: the verifier is one of the beneficiaries.
+    pub fn create_campaign_with_beneficiaries(
+        env: Env,
+        creator: Address,
+        beneficiaries: Vec<Beneficiary>,
+        verifier: Address,
+        token: Address,
+        kind: CampaignKind,
+        metadata_uri: String,
+        deadline: u64,
+        milestones: Vec<i128>,
+    ) -> Result<u64, Error> {
+        if beneficiaries.is_empty() || beneficiaries.len() > MAX_BENEFICIARIES {
+            return Err(Error::InvalidBeneficiaries);
+        }
+        let mut total_bps: u32 = 0;
+        for (i, b) in beneficiaries.iter().enumerate() {
+            if b.bps == 0 {
+                return Err(Error::InvalidBeneficiaries);
+            }
+            total_bps = total_bps
+                .checked_add(b.bps)
+                .ok_or(Error::InvalidBeneficiaries)?;
+            if b.to == verifier {
+                return Err(Error::ConflictOfInterest);
+            }
+            for earlier in beneficiaries.iter().take(i) {
+                if earlier.to == b.to {
+                    return Err(Error::InvalidBeneficiaries);
+                }
+            }
+        }
+        if total_bps != MAX_RATIO_BPS {
+            return Err(Error::InvalidBeneficiaries);
+        }
+
+        let primary = beneficiaries.get(0).unwrap().to;
+        let id = Self::create_campaign(
+            env.clone(),
+            creator,
+            primary,
+            verifier,
+            token,
+            kind,
+            metadata_uri,
+            deadline,
+            milestones,
+        )?;
+        if beneficiaries.len() > 1 {
+            storage::set_beneficiaries(&env, id, &beneficiaries);
+        }
+        Ok(id)
+    }
+
+    /// Returns the beneficiaries of `campaign_id`: the split list, or the single
+    /// beneficiary with 10,000 bps for an ordinary campaign.
+    ///
+    /// # Errors
+    /// - [`Error::CampaignNotFound`]: no campaign with `campaign_id` exists.
+    pub fn get_beneficiaries(env: Env, campaign_id: u64) -> Result<Vec<Beneficiary>, Error> {
+        let campaign = storage::campaign(&env, campaign_id)?;
+        Ok(storage::beneficiaries(&env, campaign_id).unwrap_or_else(|| {
+            let mut single = Vec::new(&env);
+            single.push_back(Beneficiary {
+                to: campaign.beneficiary,
+                bps: MAX_RATIO_BPS,
+            });
+            single
+        }))
     }
 
     /// Updates the off-chain metadata URI for `campaign_id`.
@@ -1030,6 +1174,7 @@ impl Aidline {
     /// - [`Error::MilestoneOverdue`]: a milestone is overdue.
     /// - [`Error::GoalExceeded`]: campaign is already fully funded.
     pub fn donate(env: Env, donor: Address, campaign_id: u64, amount: i128) -> Result<i128, Error> {
+        Self::ensure_current_schema(&env)?;
         donor.require_auth();
         if storage::is_paused(&env) {
             return Err(Error::Paused);
@@ -1104,6 +1249,7 @@ impl Aidline {
         cap: i128,
         amount: i128,
     ) -> Result<(), Error> {
+        Self::ensure_current_schema(&env)?;
         sponsor.require_auth();
 
         if ratio_bps == 0 || ratio_bps > MAX_RATIO_BPS {
@@ -1176,6 +1322,7 @@ impl Aidline {
         donor: Address,
         donation_amount: i128,
     ) -> Result<i128, Error> {
+        Self::ensure_current_schema(&env)?;
         if donation_amount <= 0 {
             return Err(Error::InvalidAmount);
         }
@@ -1306,6 +1453,7 @@ impl Aidline {
         campaign_id: u64,
         pledged_amount: i128,
     ) -> Result<u64, Error> {
+        Self::ensure_current_schema(&env)?;
         donor.require_auth();
 
         if pledged_amount <= 0 {
@@ -1396,7 +1544,9 @@ impl Aidline {
     /// - [`Error::AdvanceAlreadyTaken`]: the fast-track has already been used
     ///   on this campaign.
     /// - [`Error::AdvanceExceedsEscrow`]: no funds are currently in escrow.
+    /// - [`Error::InvalidAmount`]: emergency advance cap calculation overflows.
     pub fn emergency_fast_track(env: Env, campaign_id: u64) -> Result<i128, Error> {
+        Self::ensure_current_schema(&env)?;
         let mut campaign = storage::campaign(&env, campaign_id)?;
         campaign.verifier.require_auth();
 
@@ -1418,9 +1568,12 @@ impl Aidline {
             return Err(Error::AdvanceAlreadyTaken);
         }
 
-        // Cap: 20% of goal, rounded down, and never more than milestone 0.
-        let m0 = campaign.milestones.get(0).ok_or(Error::NoMilestonesLeft)?;
-        let cap = (campaign.goal * EMERGENCY_ADVANCE_BPS / BPS_DENOM).min(m0);
+        // Cap: 20% of goal, rounded down (favors the contract, never exceeds).
+        let cap = campaign
+            .goal
+            .checked_mul(EMERGENCY_ADVANCE_BPS)
+            .ok_or(Error::InvalidAmount)?
+            / BPS_DENOM;
 
         // Available escrow = raised − already released.
         let available = campaign.raised - campaign.released;
@@ -1431,11 +1584,7 @@ impl Aidline {
         // Advance is the lesser of the 20% cap and available escrow.
         let advance = if available < cap { available } else { cap };
 
-        token::Client::new(&env, &campaign.token).transfer(
-            &env.current_contract_address(),
-            &campaign.beneficiary,
-            &advance,
-        );
+        Self::pay_beneficiaries(&env, &campaign, advance);
 
         // Record: advance is accounted as both released and emergency_advance.
         campaign.released += advance;
@@ -1552,6 +1701,7 @@ impl Aidline {
         if proof_uri.len() > MAX_URI_LENGTH {
             return Err(Error::UriTooLong);
         }
+        Self::ensure_current_schema(env)?;
         verifier.require_auth();
 
         if storage::is_paused(env) {
@@ -1588,6 +1738,7 @@ impl Aidline {
         }
         approvals.push_back(verifier.clone());
         storage::save_milestone_approvals(env, campaign_id, index, &approvals);
+        Self::bump_verifier(env, &verifier, |s| s.milestones_approved += 1);
 
         MilestoneApproved {
             campaign_id,
@@ -1643,11 +1794,7 @@ impl Aidline {
         let beneficiary_payout = remaining - fee;
 
         if beneficiary_payout > 0 {
-            token::Client::new(env, &campaign.token).transfer(
-                &env.current_contract_address(),
-                &campaign.beneficiary,
-                &beneficiary_payout,
-            );
+            Self::pay_beneficiaries(env, &campaign, beneficiary_payout);
         }
 
         if fee > 0
@@ -1665,6 +1812,7 @@ impl Aidline {
         campaign.last_approval_time = env.ledger().timestamp();
         if campaign.milestones_released == campaign.milestones.len() {
             campaign.status = CampaignStatus::Completed;
+            Self::bump_all_verifiers(env, &campaign.verifiers, |s| s.campaigns_completed += 1);
         }
         storage::save_campaign(env, &campaign);
 
@@ -1700,6 +1848,7 @@ impl Aidline {
 
         campaign.status = CampaignStatus::Cancelled;
         storage::save_campaign(&env, &campaign);
+        Self::bump_all_verifiers(&env, &campaign.verifiers, |s| s.campaigns_cancelled += 1);
 
         CampaignCancelled { campaign_id }.publish(&env);
         Ok(())
@@ -1735,6 +1884,7 @@ impl Aidline {
 
         campaign.status = CampaignStatus::Cancelled;
         storage::save_campaign(&env, &campaign);
+        Self::bump_all_verifiers(&env, &campaign.verifiers, |s| s.campaigns_cancelled += 1);
 
         CampaignCancelledWithReason {
             campaign_id,
@@ -1780,6 +1930,7 @@ impl Aidline {
     }
 
     fn execute_refund(env: &Env, donor: &Address, campaign_id: u64) -> Result<i128, Error> {
+        Self::ensure_current_schema(env)?;
         let mut campaign = storage::campaign(env, campaign_id)?;
 
         let expired = Self::is_expired(env, &campaign);
@@ -1794,6 +1945,7 @@ impl Aidline {
         if !ended && is_overdue {
             campaign.status = CampaignStatus::Cancelled;
             storage::save_campaign(env, &campaign);
+            Self::bump_all_verifiers(env, &campaign.verifiers, |s| s.campaigns_cancelled += 1);
             CampaignCancelled { campaign_id }.publish(env);
         }
 
@@ -1802,9 +1954,15 @@ impl Aidline {
             return Err(Error::NothingToRefund);
         }
 
-        let pool =
-            campaign.raised - campaign.released + storage::slashed_recovery(env, campaign_id);
-        let amount = contributed * pool / campaign.raised;
+        if campaign.raised == 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let unreleased = campaign.raised - campaign.released;
+        let numerator = contributed
+            .checked_mul(unreleased)
+            .ok_or(Error::InvalidAmount)?;
+        let amount = numerator / campaign.raised;
 
         storage::set_contribution(env, campaign_id, donor, 0);
         if amount > 0 {
@@ -1865,6 +2023,9 @@ impl Aidline {
         campaign.threshold = 1;
         campaign.verifier_reassignments += 1;
         storage::save_campaign(&env, &campaign);
+        // Only the new verifier is assigned now; the old one keeps the record
+        // of the campaign they held (Issue #119).
+        Self::bump_verifier(&env, &new_verifier, |s| s.campaigns_assigned += 1);
 
         VerifierReassigned {
             campaign_id,
@@ -1877,6 +2038,15 @@ impl Aidline {
     }
 
     // ─── Views ────────────────────────────────────────────────────────────────
+
+    /// Returns `verifier`'s on-chain track record (Issue #119): campaigns
+    /// assigned, milestone approvals recorded, campaigns completed and
+    /// cancelled while assigned, and the total slashed from their bond. All
+    /// zeros for an address that has done nothing. A reassigned campaign counts
+    /// for whoever held it at the time of each event.
+    pub fn verifier_stats(env: Env, verifier: Address) -> VerifierStats {
+        storage::verifier_stats(&env, &verifier)
+    }
 
     /// Returns the [`Campaign`] for `campaign_id`.
     ///
@@ -2032,12 +2202,10 @@ impl Aidline {
         if pool <= 0 {
             return 0;
         }
-        contributed * pool / campaign.raised
-    }
-
-    /// Returns the slashed verifier bond amount held for `campaign_id`'s donors.
-    pub fn slashed_recovery(env: Env, campaign_id: u64) -> i128 {
-        storage::slashed_recovery(&env, campaign_id)
+        let Some(numerator) = contributed.checked_mul(unreleased) else {
+            return 0;
+        };
+        numerator / campaign.raised
     }
 
     /// Returns `true` if `who` is currently a registered verifier.
@@ -2138,6 +2306,65 @@ impl Aidline {
         Ok(())
     }
 
+    /// Pays `amount` out of escrow to the campaign's beneficiary, or splits it
+    /// across its beneficiaries (Issue #116). Every share is rounded down and
+    /// the leftover goes to the first beneficiary, so the payments always sum to
+    /// exactly `amount`.
+    /// Applies `update` to one verifier's track record (Issue #119).
+    fn bump_verifier(env: &Env, who: &Address, update: impl FnOnce(&mut VerifierStats)) {
+        let mut stats = storage::verifier_stats(env, who);
+        update(&mut stats);
+        storage::save_verifier_stats(env, who, &stats);
+    }
+
+    /// Applies `update` to the track record of every verifier on a campaign.
+    fn bump_all_verifiers(env: &Env, who: &Vec<Address>, update: impl Fn(&mut VerifierStats)) {
+        for verifier in who.iter() {
+            Self::bump_verifier(env, &verifier, &update);
+        }
+    }
+
+    /// Fails while stored data is older than this build expects (Issue #118).
+    fn ensure_current_schema(env: &Env) -> Result<(), Error> {
+        if storage::schema_version(env) < SCHEMA_VERSION {
+            return Err(Error::MigrationPending);
+        }
+        Ok(())
+    }
+
+    fn pay_beneficiaries(env: &Env, campaign: &Campaign, amount: i128) {
+        let tok = token::Client::new(env, &campaign.token);
+        let from = env.current_contract_address();
+        let Some(list) = storage::beneficiaries(env, campaign.id) else {
+            tok.transfer(&from, &campaign.beneficiary, &amount);
+            return;
+        };
+
+        let mut shares: Vec<i128> = Vec::new(env);
+        let mut paid: i128 = 0;
+        for b in list.iter() {
+            let share = amount * (b.bps as i128) / MAX_RATIO_BPS as i128;
+            paid += share;
+            shares.push_back(share);
+        }
+        let dust = amount - paid;
+        for (i, b) in list.iter().enumerate() {
+            let mut share = shares.get(i as u32).unwrap();
+            if i == 0 {
+                share += dust;
+            }
+            if share > 0 {
+                tok.transfer(&from, &b.to, &share);
+                BeneficiaryPaid {
+                    campaign_id: campaign.id,
+                    recipient: b.to,
+                    amount: share,
+                }
+                .publish(env);
+            }
+        }
+    }
+
     /// Pull pledge funds proportionally toward `milestone_amount`.
     ///
     /// Returns the total amount actually pulled from pledges.
@@ -2189,10 +2416,20 @@ impl Aidline {
             let pledge_remaining = pledge.pledged_amount - pledge.pulled_amount;
 
             // Proportional share: milestone_amount * pledge_remaining / total_remaining.
-            let share = milestone_amount
-                .checked_mul(pledge_remaining)
-                .unwrap_or(i128::MAX)
-                / total_remaining;
+            let numerator = match milestone_amount.checked_mul(pledge_remaining) {
+                Some(n) => n,
+                None => {
+                    PledgeSkipped {
+                        pledge_id: pledge.pledge_id,
+                        campaign_id,
+                        donor: pledge.donor.clone(),
+                        reason: SKIP_REASON_OVERFLOW,
+                    }
+                    .publish(env);
+                    continue;
+                }
+            };
+            let share = numerator / total_remaining;
 
             if share <= 0 {
                 PledgeSkipped {
