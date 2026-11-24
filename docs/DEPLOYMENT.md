@@ -23,6 +23,38 @@ make build   # builds target/wasm32v1-none/release/aidline.wasm
 
 These are the same checks CI runs.
 
+## Verify a build (WASM hash)
+
+Mainnet needs a recorded WASM hash, and a reviewer needs a way to check that a build matches it.
+
+```sh
+make wasm-hash
+```
+
+prints a report you can paste into a release note:
+
+```text
+wasm:    aidline.optimized.wasm
+sha256:  <64 hex characters>
+size:    <bytes> bytes
+rustc:   rustc <version> (<commit> <date>)
+cargo:   cargo <version> (<commit> <date>)
+stellar: stellar <version> (<commit>)
+```
+
+The script builds with `--locked` into a fresh target directory, with incremental compilation off, a fixed `SOURCE_DATE_EPOCH` and the checkout and cargo paths remapped, then runs `stellar contract optimize`. The hash is for the optimized file, not the raw `cargo build` output that `make build` leaves in `target/`.
+
+**What has to match.** The hash only reproduces on the same `rustc`, `cargo` and Stellar CLI versions, and from the same `Cargo.lock`. CI uses the floating `stable` Rust channel and Stellar CLI 28.1.0, so record the `rustc` and `stellar` lines from the report next to the hash in every release note, and install exactly those versions to verify it.
+
+**Verifying a release.**
+
+1. Check out the release tag.
+2. Install the `rustc` and Stellar CLI versions from the release note.
+3. Run `./scripts/wasm-hash.sh --verify <sha256 from the release note>`. It exits non-zero and prints both hashes if they differ.
+4. Compare the hash with the one in the contract's deployed wasm (`stellar contract info`, or the hash used in `upgrade`) before trusting a deployment.
+
+`./scripts/wasm-hash.sh --twice` builds twice from clean target directories and fails if the two hashes differ. Run it after changing the toolchain or the build profile.
+
 ## Deploy to testnet
 
 ```sh
