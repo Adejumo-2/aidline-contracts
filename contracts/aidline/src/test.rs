@@ -703,6 +703,35 @@ fn emergency_fast_track_works_for_emergency_campaign() {
 }
 
 #[test]
+fn emergency_fast_track_capped_by_milestone_zero() {
+    let s = Setup::new();
+    let id = s.client.create_campaign(
+        &s.creator,
+        &s.beneficiary,
+        &s.verifier,
+        &s.token.address,
+        &CampaignKind::Emergency,
+        &String::from_str(&s.env, "ipfs://flood-relief"),
+        &(s.env.ledger().timestamp() + 30 * DAY),
+        &vec![&s.env, 100, 400, 500],
+    );
+    let donor = s.donor(1_000);
+    s.client.donate(&donor, &id, &1_000);
+
+    // 20% of goal is 200, but milestone 0 is only 100.
+    assert_eq!(s.client.emergency_fast_track(&id), 100);
+    assert_eq!(s.client.get_campaign(&id).released, 100);
+
+    // Approving milestone 0 pays nothing more and keeps `released` intact.
+    s.client.approve_milestone(&id, &s.proof());
+    let c = s.client.get_campaign(&id);
+    assert_eq!(c.released, 100);
+    assert_eq!(c.milestones_released, 1);
+    assert_eq!(s.token.balance(&s.beneficiary), 100);
+    assert_eq!(s.token.balance(&s.client.address), 900);
+}
+
+#[test]
 fn emergency_fast_track_limited_by_escrow() {
     let s = Setup::new();
     let id = s.campaign(); // Goal 1000
@@ -1589,6 +1618,29 @@ fn an_active_bond_cannot_be_withdrawn() {
 }
 
 #[test]
+fn admin_removal_moves_bond_to_pending_withdrawal() {
+    let s = Setup::new();
+    s.client.set_bond_withdraw_delay(&(7 * DAY));
+    let v = s.bonded_verifier(1_000, 100);
+
+    s.client.remove_verifier(&v);
+
+    assert!(!s.client.is_verifier(&v));
+    let bond = s.client.get_verifier_bond(&v).unwrap();
+    assert_eq!(bond.status, BondStatus::PendingWithdrawal);
+    assert_eq!(bond.deregistered_at, s.env.ledger().timestamp());
+    assert_eq!(
+        s.client.try_withdraw_bond(&v),
+        Err(Ok(Error::WithdrawDelayNotMet))
+    );
+
+    let now = s.env.ledger().timestamp();
+    s.env.ledger().set_timestamp(now + 7 * DAY);
+    assert_eq!(s.client.withdraw_bond(&v), 100);
+    assert_eq!(s.token.balance(&v), 1_000);
+}
+
+#[test]
 fn bond_withdrawal_waits_for_the_delay() {
     let s = Setup::new();
     s.client.set_bond_withdraw_delay(&(7 * DAY));
@@ -1630,7 +1682,7 @@ fn a_bond_cannot_be_withdrawn_twice() {
 }
 
 #[test]
-fn slashing_moves_the_bond_into_the_campaign_for_donors() {
+fn slashing_moves_the_bond_into_the_recovery_pool_for_donors() {
     let s = Setup::new();
     let v = s.bonded_verifier(1_000, 400);
     let id = s.campaign();
@@ -1640,7 +1692,29 @@ fn slashing_moves_the_bond_into_the_campaign_for_donors() {
     let bond = s.client.get_verifier_bond(&v).unwrap();
     assert_eq!(bond.remaining, 250);
     assert_eq!(bond.status, BondStatus::Active);
-    assert_eq!(s.client.get_campaign(&id).raised, 150);
+    assert_eq!(s.client.get_campaign(&id).raised, 0);
+    assert_eq!(s.client.slashed_recovery(&id), 150);
+}
+
+#[test]
+fn slashed_bond_is_split_pro_rata_among_refunding_donors() {
+    let s = Setup::new();
+    let v = s.bonded_verifier(1_000, 400);
+    let id = s.campaign(); // Goal 1000
+    let donor_a = s.donor(600);
+    let donor_b = s.donor(400);
+    s.client.donate(&donor_a, &id, &600);
+    s.client.donate(&donor_b, &id, &400);
+    s.client.approve_milestone(&id, &s.proof()); // 300 released
+
+    s.client.slash_verifier(&v, &id, &200);
+    s.client.cancel_campaign(&s.creator, &id);
+
+    // Pool = (1000 - 300) + 200 = 900, split 60/40.
+    assert_eq!(s.client.refund(&donor_a, &id), 540);
+    assert_eq!(s.client.refund(&donor_b, &id), 360);
+    // Only the unslashed remainder of the bond is left in the contract.
+    assert_eq!(s.token.balance(&s.client.address), 200);
 }
 
 #[test]
@@ -1674,6 +1748,21 @@ fn slash_validates_its_arguments() {
         s.client.try_slash_verifier(&v, &id, &401),
         Err(Ok(Error::SlashExceedsBond))
     );
+}
+
+#[test]
+fn slash_with_unknown_campaign_fails_and_leaves_bond_untouched() {
+    let s = Setup::new();
+    let v = s.bonded_verifier(1_000, 400);
+
+    assert_eq!(
+        s.client.try_slash_verifier(&v, &9_999, &150),
+        Err(Ok(Error::CampaignNotFound))
+    );
+
+    let bond = s.client.get_verifier_bond(&v).unwrap();
+    assert_eq!(bond.remaining, 400);
+    assert_eq!(bond.status, BondStatus::Active);
 }
 
 #[test]
@@ -1722,7 +1811,7 @@ fn slashing_completed_campaign_fails_and_does_not_deduct_bond() {
     s.client.slash_verifier(&v, &id_cancelled, &100);
     let bond_after = s.client.get_verifier_bond(&v).unwrap();
     assert_eq!(bond_after.remaining, 300);
-    assert_eq!(s.client.get_campaign(&id_cancelled).raised, 100);
+    assert_eq!(s.client.slashed_recovery(&id_cancelled), 100);
 }
 
 // ─── Sponsor matching pools (issue #27) ───────────────────────────────────────

@@ -117,12 +117,31 @@ impl Aidline {
     /// the verifier will freeze until the campaign is cancelled or reassigned
     /// via [`reassign_verifier`]. Emits [`VerifierUpdated`] with `active = false`.
     ///
+    /// If the verifier has an active bond it moves to `PendingWithdrawal` (as in
+    /// [`deregister_verifier`]) and [`VerifierDeregistered`] is emitted, so the
+    /// bond can always be withdrawn after the delay.
+    ///
     /// # Errors
     /// - [`Error::Unauthorized`]: caller is not the admin (enforced via
     ///   `require_auth` on the stored admin address).
     pub fn remove_verifier(env: Env, verifier: Address) {
         storage::admin(&env).require_auth();
         storage::set_verifier(&env, &verifier, false);
+
+        if let Some(mut bond) = storage::verifier_bond(&env, &verifier)
+            && bond.status == BondStatus::Active
+        {
+            let now = env.ledger().timestamp();
+            bond.status = BondStatus::PendingWithdrawal;
+            bond.deregistered_at = now;
+            storage::save_verifier_bond(&env, &bond);
+            VerifierDeregistered {
+                verifier: verifier.clone(),
+                deregistered_at: now,
+            }
+            .publish(&env);
+        }
+
         VerifierUpdated {
             verifier,
             active: false,
@@ -558,7 +577,7 @@ impl Aidline {
     }
 
     /// Slashes `slash_amount` from `verifier`'s bond and credits it to
-    /// `campaign_id`'s raised total so it is distributed to donors on refund.
+    /// `campaign_id`'s slashed recovery pool so it is distributed to donors pro-rata on refund.
     ///
     /// Only the admin may call this. The slash amount must not exceed the
     /// verifier's remaining bond. Emits [`BondSlashed`].
@@ -592,7 +611,7 @@ impl Aidline {
             return Err(Error::SlashExceedsBond);
         }
 
-        let mut campaign = storage::campaign(&env, campaign_id)?;
+        let campaign = storage::campaign(&env, campaign_id)?;
         if campaign.status == CampaignStatus::Completed {
             return Err(Error::CampaignNotActive);
         }
@@ -604,14 +623,8 @@ impl Aidline {
         storage::save_verifier_bond(&env, &bond);
         Self::bump_verifier(&env, &verifier, |s| s.total_slashed += slash_amount);
 
-        let contract_addr = env.current_contract_address();
-        let prev = storage::contribution(&env, campaign_id, &contract_addr);
-        campaign.raised = campaign
-            .raised
-            .checked_add(slash_amount)
-            .unwrap_or(campaign.raised);
-        storage::save_campaign(&env, &campaign);
-        storage::set_contribution(&env, campaign_id, &contract_addr, prev + slash_amount);
+        let recovery = storage::slashed_recovery(&env, campaign_id);
+        storage::set_slashed_recovery(&env, campaign_id, recovery + slash_amount);
 
         BondSlashed {
             verifier: verifier.clone(),
@@ -1762,7 +1775,7 @@ impl Aidline {
         } else {
             0
         };
-        let remaining = milestone_amount - already_paid;
+        let remaining = milestone_amount.saturating_sub(already_paid);
 
         let available = campaign.raised - campaign.released;
         if available < remaining {
@@ -1886,7 +1899,7 @@ impl Aidline {
     ///
     /// A refund is available when the campaign is cancelled, past its
     /// deadline, or a per-milestone due date has been missed. The refund
-    /// amount is `contribution * (raised - released) / raised`. After the
+    /// amount is `contribution * (raised - released + slashed_recovery) / raised`. After the
     /// transfer the donor's contribution record is zeroed. Emits [`Refunded`]
     /// and returns the amount transferred.
     ///
@@ -2184,8 +2197,9 @@ impl Aidline {
         if contributed == 0 || campaign.raised == 0 {
             return 0;
         }
-        let unreleased = campaign.raised - campaign.released;
-        if unreleased <= 0 {
+        let pool =
+            campaign.raised - campaign.released + storage::slashed_recovery(&env, campaign_id);
+        if pool <= 0 {
             return 0;
         }
         let Some(numerator) = contributed.checked_mul(unreleased) else {

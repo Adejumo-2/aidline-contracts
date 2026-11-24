@@ -49,7 +49,7 @@ Expiry is computed from the ledger timestamp rather than stored, so no one needs
 For `Emergency` campaigns, the assigned verifier can release an emergency fast-track advance immediately, before milestone one is completed. 
 This provides critical funds in the first hours of a disaster without waiting for a full milestone to be funded or proven.
 
-- **Cap:** The advance is hard-capped at 20% of the campaign's total goal.
+- **Cap:** The advance is hard-capped at `min(20% of the campaign's total goal, milestone 0 allocation)`.
 - **Escrow requirements:** The advance cannot exceed the currently available unreleased escrow.
 - **Accounting:** The advance is recorded against milestone one (`milestones[0]`). When the verifier later formally approves milestone one, the contract only transfers the remaining balance (if any) of that milestone to the beneficiary. The total funds released for milestone one never exceed its scheduled amount.
 - **Security:** Only the registered verifier can trigger the fast track. It is only available for `Emergency` campaigns, and only once per campaign.
@@ -313,7 +313,7 @@ After deregistration the verifier must wait at least `bond_withdraw_delay` secon
 1. Requires auth from the admin.
 2. Checks that `slash_amount <= bond.remaining`.
 3. Reduces `bond.remaining` by `slash_amount`.
-4. Distributes the slashed tokens back to the affected campaign's donors by adding `slash_amount` to `campaign.raised` and crediting the contract as the "donor", so the existing pro-rata refund formula automatically distributes the recovered funds to all contributors when they call `refund`.
+4. Credits `slash_amount` to the campaign's `SlashedRecovery` pool (`campaign.raised` is left untouched). `refund` pays each donor `contributed * (raised - released + slashed_recovery) / raised`, so slashed funds are distributed pro-rata to contributors and nothing is credited to the contract address.
 5. Emits `BondSlashed`.
 
 Preventing double-slash for the same dispute is enforced by tracking slashed amounts; the admin cannot slash more than `bond.remaining`.

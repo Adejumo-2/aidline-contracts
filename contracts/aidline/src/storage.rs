@@ -208,6 +208,17 @@ pub fn set_contribution(env: &Env, id: u64, donor: &Address, amount: i128) {
     }
 }
 
+pub fn slashed_recovery(env: &Env, id: u64) -> i128 {
+    let key = DataKey::SlashedRecovery(id);
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+pub fn set_slashed_recovery(env: &Env, id: u64, amount: i128) {
+    let key = DataKey::SlashedRecovery(id);
+    env.storage().persistent().set(&key, &amount);
+    bump(env, &key);
+}
+
 pub fn campaign_donors(env: &Env, campaign_id: u64) -> Vec<Address> {
     let key = DataKey::CampaignDonors(campaign_id);
     if let Some(donors) = env.storage().persistent().get(&key) {
