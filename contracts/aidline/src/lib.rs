@@ -88,8 +88,17 @@ impl Aidline {
     /// Called once at deployment time; may not be called again.
     ///
     /// # Errors
-    /// This function does not return errors; panics if storage is unavailable.
+    /// This function does not return errors; panics if storage is unavailable
+    /// or if `admin` and `token` are invalid (e.g. identical or self-referential).
     pub fn __constructor(env: Env, admin: Address, token: Address) {
+        if admin == token {
+            panic!("admin and token must be distinct");
+        }
+        let contract = env.current_contract_address();
+        if admin == contract || token == contract {
+            panic!("admin and token cannot be self address");
+        }
+
         storage::set_admin(&env, &admin);
         storage::set_token(&env, &token);
         storage::set_token_allowed(&env, &token, true);

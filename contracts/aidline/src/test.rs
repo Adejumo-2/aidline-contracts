@@ -48,7 +48,25 @@ impl<'a> Setup<'a> {
             verifier,
         }
     }
+}
 
+#[test]
+#[should_panic(expected = "admin and token must be distinct")]
+fn constructor_rejects_identical_admin_and_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let addr = Address::generate(&env);
+    env.register(Aidline, (addr.clone(), addr));
+}
+
+#[test]
+fn constructor_initializes_storage_properly_with_distinct_addresses() {
+    let s = Setup::new();
+    assert_eq!(s.client.admin(), s.admin);
+    assert!(s.client.is_token_allowed(&s.token.address));
+}
+
+impl<'a> Setup<'a> {
     fn donor(&self, balance: i128) -> Address {
         let donor = Address::generate(&self.env);
         StellarAssetClient::new(&self.env, &self.token.address).mint(&donor, &balance);
