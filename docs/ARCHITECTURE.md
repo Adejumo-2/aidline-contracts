@@ -57,6 +57,28 @@ This provides critical funds in the first hours of a disaster without waiting fo
 ## Resource budget tests
 
 `mod budget` in `contracts/aidline/src/test.rs` reads the host budget (CPU instructions and memory bytes) for `create_campaign`, `donate`, `apply_matching`, `approve_milestone` and `refund`, and fails if a call goes over the ceiling in its table, naming the call and the overshoot. The ceilings start at a quarter of the network's per-transaction limits. To tighten them, run `cargo test budget -- --nocapture` to print the measured numbers and set each ceiling about 25 percent above its number.
+## Verifier track record
+
+The contract keeps a fixed-size `VerifierStats` entry per verifier, read with `verifier_stats(verifier)`. It never grows with the number of campaigns.
+
+| Counter | Updated when |
+|---------|--------------|
+| `campaigns_assigned` | a campaign is created with the verifier, and when `reassign_verifier` makes them the campaign's verifier |
+| `milestones_approved` | the verifier records an approval (each multisig vote counts for the voter) |
+| `campaigns_completed` | the last milestone is released while the verifier is assigned |
+| `campaigns_cancelled` | `cancel_campaign`, `cancel_campaign_with_reason` or a missed milestone due date cancels the campaign while the verifier is assigned |
+| `total_slashed` | `slash_verifier` takes `slash_amount` from their bond |
+
+Reassignment never moves counters: the previous verifier keeps what happened while they held the campaign, and everything after the handover counts for the new verifier.
+
+## Split payouts
+
+A campaign normally pays one beneficiary. `create_campaign_with_beneficiaries` takes up to `MAX_BENEFICIARIES` (10) recipients with shares in basis points instead.
+
+- **Validation:** shares are positive, sum to exactly 10,000 and name distinct addresses, and the verifier cannot be one of the beneficiaries (`ConflictOfInterest`). Anything else is `InvalidBeneficiaries`.
+- **Payout:** `approve_milestone` (after the platform fee) and `emergency_fast_track` give each beneficiary `amount * bps / 10_000`, rounded down. The rounding dust goes to the first beneficiary, so the payments always sum to exactly the amount released.
+- **Events:** every recipient that receives funds gets a `paid` event with the campaign id, the recipient and the amount.
+- **Single beneficiary:** a one-entry list, or `create_campaign`, behaves exactly as before. `get_beneficiaries` returns the single beneficiary with 10,000 bps for those campaigns.
 
 ## Emergency Pause Switch
 

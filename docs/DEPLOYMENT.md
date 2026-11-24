@@ -130,6 +130,18 @@ stellar contract invoke --id $AIDLINE_CONTRACT_ID --network testnet --source dep
   -- campaign_count
 ```
 
+## Upgrading a deployed contract
+
+The contract keeps a storage schema version in instance storage. `schema_version()` reports it, and a build only runs against data at its own `SCHEMA_VERSION`.
+
+1. Build and test the new wasm, and check whether `SCHEMA_VERSION` changed.
+2. Upload the wasm and call `upgrade(new_wasm_hash)` as the admin.
+3. Call `schema_version()`. If it is lower than the new build's `SCHEMA_VERSION` (a deployment from before versioning reports `0`), the state-changing entry points (`create_*campaign*`, `donate`, `approve_milestone*`, `emergency_fast_track`, `refund*`, `deposit_sponsor_pool`, `apply_matching`, `create_pledge`, `register_with_bond`) fail with `MigrationPending` (49) until step 4 is done. Reads keep working.
+4. Call `migrate()` as the admin. It upgrades the data one version at a time, returns the new version and publishes a `migrated` event with `(from, to)`.
+5. `migrate()` can be called again safely; with nothing pending it changes nothing.
+
+When you change a stored struct, raise `SCHEMA_VERSION` and add the step for the old version to the `match` in `migrate`.
+
 ## Keys and secrets
 
 - The deployer identity becomes the admin. Treat its key as the most sensitive thing in the project.

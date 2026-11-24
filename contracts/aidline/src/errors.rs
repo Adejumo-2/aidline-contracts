@@ -81,6 +81,11 @@ pub enum Error {
     // Milestone due date
     MilestoneOverdue = 42,
 
+    // Split payouts
+    InvalidBeneficiaries = 48,
+
+    // Storage schema versioning
+    MigrationPending = 49,
     // Challenge window
     NoChallengeWindow = 60,
     ProposalPending = 61,
