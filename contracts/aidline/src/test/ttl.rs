@@ -8,8 +8,9 @@ use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
 /// Remaining TTL, in ledgers, of a persistent key. Read through the test
 /// environment; it panics if the key does not exist.
 fn ttl(s: &Setup, key: &DataKey) -> u32 {
-    s.env
-        .as_contract(&s.client.address, || s.env.storage().persistent().get_ttl(key))
+    s.env.as_contract(&s.client.address, || {
+        s.env.storage().persistent().get_ttl(key)
+    })
 }
 
 fn assert_extended(s: &Setup, key: DataKey) {
@@ -40,7 +41,8 @@ fn every_persistent_key_is_extended_by_the_call_that_writes_it() {
     assert_extended(&s, DataKey::CampaignDonors(id));
 
     let sponsor = s.donor(1_000);
-    s.client.deposit_sponsor_pool(&sponsor, &id, &5_000, &500, &500);
+    s.client
+        .deposit_sponsor_pool(&sponsor, &id, &5_000, &500, &500);
     assert_extended(&s, DataKey::SponsorPool(id, sponsor.clone()));
 
     let pledger = s.donor(500);
@@ -110,6 +112,89 @@ fn reads_of_verifier_contribution_and_allowlist_extend_their_entries() {
     assert_extended(&s, allowed_key);
 }
 
+#[test]
+fn is_verifier_extends_ttl_to_persistent_bump_and_ignores_unknown() {
+    use crate::storage::PERSISTENT_BUMP;
+
+    let s = Setup::new();
+    let unknown = Address::generate(&s.env);
+
+    s.env
+        .ledger()
+        .set_sequence_number(s.env.ledger().sequence() + 10 * 17_280);
+
+    let verifier_key = DataKey::Verifier(s.verifier.clone());
+    let unknown_key = DataKey::Verifier(unknown.clone());
+    assert!(ttl(&s, &verifier_key) < PERSISTENT_THRESHOLD);
+
+    assert!(s.client.is_verifier(&s.verifier));
+    assert_eq!(ttl(&s, &verifier_key), PERSISTENT_BUMP);
+
+    assert!(!s.client.is_verifier(&unknown));
+    let has_unknown = s.env.as_contract(&s.client.address, || {
+        s.env.storage().persistent().has(&unknown_key)
+    });
+    assert!(!has_unknown);
+}
+
+#[test]
+fn contribution_of_extends_ttl_to_persistent_bump_and_protects_long_running_refund() {
+    use crate::storage::PERSISTENT_BUMP;
+
+    let s = Setup::new();
+    let day_in_ledgers = 17_280;
+    let future = s.env.ledger().timestamp() + 400 * DAY;
+    let id = s.client.create_campaign(
+        &s.creator,
+        &s.beneficiary,
+        &s.verifier,
+        &s.token.address,
+        &CampaignKind::Climate,
+        &String::from_str(&s.env, "ipfs://climate-1yr"),
+        &future,
+        &vec![&s.env, 1_000],
+    );
+
+    let donor = s.donor(500);
+    let non_donor = Address::generate(&s.env);
+    s.client.donate(&donor, &id, &500);
+
+    let contribution_key = DataKey::Contribution(id, donor.clone());
+    let non_donor_key = DataKey::Contribution(id, non_donor.clone());
+
+    // Advance to day 100 (within extension window, before 120-day expiry)
+    s.env
+        .ledger()
+        .set_sequence_number(s.env.ledger().sequence() + 100 * day_in_ledgers);
+    assert!(ttl(&s, &contribution_key) < PERSISTENT_THRESHOLD);
+
+    // Querying contribution_of refreshes the contribution TTL to PERSISTENT_BUMP
+    assert_eq!(s.client.contribution_of(&id, &donor), 500);
+    assert_eq!(ttl(&s, &contribution_key), PERSISTENT_BUMP);
+
+    // Querying for a non-donor does not mutate storage
+    assert_eq!(s.client.contribution_of(&id, &non_donor), 0);
+    let has_non_donor = s.env.as_contract(&s.client.address, || {
+        s.env.storage().persistent().has(&non_donor_key)
+    });
+    assert!(!has_non_donor);
+
+    // Refresh campaign and advance past 120 days (to day 150) and past deadline
+    s.client.extend_campaign_ttl(&id);
+    s.env
+        .ledger()
+        .set_sequence_number(s.env.ledger().sequence() + 50 * day_in_ledgers);
+    s.env.ledger().set_timestamp(future + 1);
+
+    // Contribution record survived past the original 120-day TTL
+    assert_eq!(s.client.contribution_of(&id, &donor), 500);
+
+    // Refund succeeds on the expired long-running campaign
+    let refunded = s.client.refund(&donor, &id);
+    assert_eq!(refunded, 500);
+    assert_eq!(s.token.balance(&donor), 500);
+}
+
 /// The instance entry (admin, token, counters, fees) is extended by every
 /// campaign call, not only by the constructor and `create_campaign`.
 #[test]
@@ -129,5 +214,8 @@ fn campaign_calls_extend_the_instance_entry() {
     let after = s
         .env
         .as_contract(&s.client.address, || s.env.storage().instance().get_ttl());
-    assert!(after >= INSTANCE_THRESHOLD, "instance left with {after} ledgers");
+    assert!(
+        after >= INSTANCE_THRESHOLD,
+        "instance left with {after} ledgers"
+    );
 }

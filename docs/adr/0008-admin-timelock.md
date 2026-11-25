@@ -1,4 +1,4 @@
-# 0007: Timelock for sensitive admin actions
+# 0008: Timelock for sensitive admin actions
 
 Status: Accepted
 

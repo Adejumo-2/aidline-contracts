@@ -23,6 +23,34 @@ pub enum CampaignStatus {
     Expired,
 }
 
+/// Structured reason codes for a verifier rejecting a pending milestone (Issue #161).
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum RejectionReason {
+    /// Submitted deliverables are incomplete or do not meet milestone scope.
+    IncompleteWork = 1,
+    /// Fraudulent activity or falsified evidence detected; triggers campaign cancellation.
+    FraudDetected = 2,
+    /// Provided proof is insufficient to verify milestone completion.
+    InsufficientProof = 3,
+    /// Reported expenditures exceed the milestone budget or allocation.
+    BudgetExceeded = 4,
+}
+
+impl RejectionReason {
+    /// Converts a numeric reason code into a [`RejectionReason`] variant.
+    pub fn from_code(code: u32) -> Option<Self> {
+        match code {
+            1 => Some(Self::IncompleteWork),
+            2 => Some(Self::FraudDetected),
+            3 => Some(Self::InsufficientProof),
+            4 => Some(Self::BudgetExceeded),
+            _ => None,
+        }
+    }
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Campaign {
@@ -121,6 +149,20 @@ pub struct QueuedAction {
     pub eta: u64,
 }
 
+/// A milestone payout that vests linearly after approval (Issue #117).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Stream {
+    /// Amount that will vest in total (shrinks to the vested amount on cancel).
+    pub total: i128,
+    /// Ledger timestamp (seconds) at which vesting started: the approval.
+    pub start: u64,
+    /// Seconds over which `total` vests. `0` means fully vested.
+    pub duration: u64,
+    /// Amount the beneficiary has already claimed.
+    pub claimed: i128,
+}
+
 /// Running record of a verifier's work, kept on chain (Issue #119). One fixed
 /// size entry per verifier, however many campaigns they have handled.
 #[contracttype]
@@ -202,6 +244,9 @@ pub enum DataKey {
     SponsorPool(u64, Address),
     // Issue #29: verifier bonds
     VerifierBond(Address),
+    // Issue #140: historical verifier bonds: (verifier, nonce) -> VerifierBond
+    HistoricalVerifierBond(Address, u32),
+    VerifierBondNonce(Address),
     BondRequirement,
     BondWithdrawDelay,
     // Issue #30: pledges
@@ -229,6 +274,19 @@ pub enum DataKey {
     QueuedAction(u64),
     // Issue #120: number of stretch milestones at the end of a campaign's milestone list
     StretchCount(u64),
+    // Slashed verifier bonds awaiting pro-rata refund to donors
+    SlashedRecovery(u64),
+    // Issue #125: ids of the pledges made to one campaign
+    CampaignPledges(u64),
+    // Issue #129: campaigns a verifier is assigned to that are not yet completed or cancelled
+    VerifierActiveCampaigns(Address),
+    // Issue #114: donor votes to cancel a stalled campaign
+    CancelVote(u64, Address),
+    CancelVoteTotal(u64),
+    CampaignStart(u64),
+    // Issue #117: per-milestone streaming release
+    MilestoneStreamDays(u64),
+    Stream(u64, u32),
     // Issue #116: beneficiaries of a split-payout campaign
     Beneficiaries(u64),
     // Issue #118: version of the stored data layout (instance storage)

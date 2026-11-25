@@ -460,6 +460,63 @@ impl EmergencyAdvanceReleased {
     }
 }
 
+// ─── Issue #114: donor votes to cancel ───────────────────────────────────────
+
+/// Emitted when a donor votes to cancel a campaign.
+pub struct CancelVoted {
+    pub campaign_id: u64,
+    pub donor: Address,
+    /// The donor's contribution, which is their vote's weight.
+    pub weight: i128,
+    /// Total weight of all votes after this one.
+    pub total: i128,
+}
+
+impl CancelVoted {
+    pub fn publish(&self, env: &Env) {
+        env.events().publish(
+            (symbol_short!("cvote"), self.campaign_id, self.donor.clone()),
+            (self.weight, self.total),
+        );
+    }
+}
+
+/// Emitted when a donor withdraws their cancel vote.
+pub struct CancelVoteWithdrawn {
+    pub campaign_id: u64,
+    pub donor: Address,
+    pub weight: i128,
+    pub total: i128,
+}
+
+impl CancelVoteWithdrawn {
+    pub fn publish(&self, env: &Env) {
+        env.events().publish(
+            (
+                symbol_short!("cvote_wd"),
+                self.campaign_id,
+                self.donor.clone(),
+            ),
+            (self.weight, self.total),
+        );
+    }
+}
+
+// ─── Issue #117: streaming release ───────────────────────────────────────────
+
+/// Emitted when the beneficiary claims what has vested from streamed milestones.
+pub struct StreamClaimed {
+    pub campaign_id: u64,
+    pub amount: i128,
+}
+
+impl StreamClaimed {
+    pub fn publish(&self, env: &Env) {
+        env.events()
+            .publish((symbol_short!("claimed"), self.campaign_id), self.amount);
+    }
+}
+
 // ─── Issue #118: storage schema migration ────────────────────────────────────
 
 /// Emitted by every `migrate` call. `from == to` when nothing was pending.
@@ -525,14 +582,15 @@ impl MilestoneApproved {
 pub struct MilestoneRejected {
     pub campaign_id: u64,
     pub index: u32,
-    pub reason_uri: String,
+    pub reason: u32,
+    pub details_uri: String,
 }
 
 impl MilestoneRejected {
     pub fn publish(&self, env: &Env) {
         env.events().publish(
             (symbol_short!("rejected"), self.campaign_id, self.index),
-            self.reason_uri.clone(),
+            (self.reason, self.details_uri.clone()),
         );
     }
 }

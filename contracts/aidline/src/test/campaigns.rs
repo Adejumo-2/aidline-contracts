@@ -143,23 +143,41 @@ fn rejects_long_metadata_uri() {
 }
 
 #[test]
-fn rejects_long_proof_uri() {
+fn rejects_invalid_proof_uri() {
     let s = Setup::new();
     let id = s.campaign();
     let donor = s.donor(1000);
-    s.client.donate(&donor, &id, &300);
+    s.client.donate(&donor, &id, &1000);
 
-    // 257 bytes should fail with UriTooLong
-    let long_str = "p".repeat(257);
+    // Empty proof URI should fail with InvalidProofUri
+    let empty_proof = String::from_str(&s.env, "");
+    let res_empty = s.client.try_approve_milestone(&id, &empty_proof);
+    assert_eq!(res_empty, Err(Ok(Error::InvalidProofUri)));
+
+    // 501 bytes should fail with InvalidProofUri
+    let long_str = "p".repeat(501);
     let long_proof = String::from_str(&s.env, &long_str);
-    let res = s.client.try_approve_milestone(&id, &long_proof);
-    assert_eq!(res, Err(Ok(Error::UriTooLong)));
+    let res_long = s.client.try_approve_milestone(&id, &long_proof);
+    assert_eq!(res_long, Err(Ok(Error::InvalidProofUri)));
 
-    // Exact limit 256 bytes should succeed
-    let max_str = "p".repeat(256);
+    // Exact limit 500 bytes should succeed (releases milestone 0: 300)
+    let max_str = "p".repeat(500);
     let max_proof = String::from_str(&s.env, &max_str);
     let ok_res = s.client.try_approve_milestone(&id, &max_proof);
     assert_eq!(ok_res, Ok(Ok(300)));
+
+    // Valid IPFS URI should succeed (releases milestone 1: 300)
+    let ipfs_proof = String::from_str(
+        &s.env,
+        "ipfs://bafybeicg2gg33zrqb33rqd6dffq72u7i7743rqd6dffq72u7i7743rqd6d",
+    );
+    let ok_ipfs = s.client.try_approve_milestone(&id, &ipfs_proof);
+    assert_eq!(ok_ipfs, Ok(Ok(300)));
+
+    // Valid HTTPS URI should succeed (releases milestone 2: 400)
+    let https_proof = String::from_str(&s.env, "https://aidline.org/proofs/milestone-3.pdf");
+    let ok_https = s.client.try_approve_milestone(&id, &https_proof);
+    assert_eq!(ok_https, Ok(Ok(400)));
 }
 
 #[test]

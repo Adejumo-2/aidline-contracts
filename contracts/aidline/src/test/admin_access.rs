@@ -20,13 +20,8 @@ fn old_admin_cannot_add_verifier_after_set_admin() {
         },
     };
 
-    let expected_auth_err = soroban_sdk::Error::from_type_and_code(
-        soroban_sdk::xdr::ScErrorType::Context,
-        soroban_sdk::xdr::ScErrorCode::InvalidAction,
-    );
     let res = s.client.mock_auths(&[auth]).try_add_verifier(&candidate);
-    let err = res.unwrap_err().unwrap();
-    assert_eq!(err, expected_auth_err);
+    assert_eq!(res.unwrap_err(), Err(InvokeError::Abort));
     assert!(!s.client.is_verifier(&candidate));
 
     // New admin can add verifier
@@ -159,7 +154,7 @@ fn old_admin_cannot_slash_verifier_after_set_admin() {
     // New admin can slash verifier
     s.client.slash_verifier(&v, &id, &150);
     assert_eq!(s.client.get_verifier_bond(&v).unwrap().remaining, 250);
-    assert_eq!(s.client.get_campaign(&id).raised, 150);
+    assert_eq!(s.client.slashed_recovery(&id), 150);
 }
 
 #[test]

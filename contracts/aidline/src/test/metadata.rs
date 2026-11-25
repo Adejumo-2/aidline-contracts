@@ -15,9 +15,44 @@ fn creator_can_update_metadata_before_donations() {
 
     let new_uri = String::from_str(&s.env, "ipfs://flood-relief-corrected-story");
     s.client.update_metadata(&id, &new_uri);
+    assert!(
+        !s.env.events().all().events().is_empty(),
+        "MetadataUpdated event should be emitted"
+    );
 
     let updated = s.client.get_campaign(&id);
     assert_eq!(updated.metadata_uri, new_uri);
+}
+
+#[test]
+fn metadata_update_validates_uri_bounds_and_cancelled_status() {
+    let s = Setup::new();
+    let id = s.campaign();
+
+    // Empty URI rejected
+    let empty_uri = String::from_str(&s.env, "");
+    assert_eq!(
+        s.client.try_update_metadata(&id, &empty_uri),
+        Err(Ok(Error::InvalidMetadataUri))
+    );
+
+    // 257-byte URI rejected (> MAX_URI_LENGTH)
+    let too_long_uri = String::from_str(
+        &s.env,
+        "https://example.com/very/long/metadata/path/that/exceeds/the/maximum/allowed/length/of/two/hundred/and/fifty/six/bytes/-----------------------------------------------------------------------------------------------------------------------------------------------",
+    );
+    assert_eq!(
+        s.client.try_update_metadata(&id, &too_long_uri),
+        Err(Ok(Error::UriTooLong))
+    );
+
+    // Cancelled campaign rejected
+    s.client.cancel_campaign(&s.creator, &id);
+    let valid_uri = String::from_str(&s.env, "ipfs://valid-uri");
+    assert_eq!(
+        s.client.try_update_metadata(&id, &valid_uri),
+        Err(Ok(Error::CampaignNotActive))
+    );
 }
 
 #[test]

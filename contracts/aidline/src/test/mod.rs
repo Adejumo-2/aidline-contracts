@@ -57,7 +57,25 @@ impl<'a> Setup<'a> {
             verifier,
         }
     }
+}
 
+#[test]
+#[should_panic(expected = "admin and token must be distinct")]
+fn constructor_rejects_identical_admin_and_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let addr = Address::generate(&env);
+    env.register(Aidline, (addr.clone(), addr));
+}
+
+#[test]
+fn constructor_initializes_storage_properly_with_distinct_addresses() {
+    let s = Setup::new();
+    assert_eq!(s.client.admin(), s.admin);
+    assert!(s.client.is_token_allowed(&s.token.address));
+}
+
+impl<'a> Setup<'a> {
     /// A fresh address minted `balance` tokens.
     fn donor(&self, balance: i128) -> Address {
         let donor = Address::generate(&self.env);
@@ -132,8 +150,11 @@ impl Setup<'_> {
 
 mod admin;
 mod admin_access;
+mod bond_lock;
 mod bonds;
 mod campaigns;
+mod cancel_vote;
+mod contract_address;
 mod costs_and_events;
 mod deadlines;
 mod donations;
@@ -144,12 +165,14 @@ mod metadata;
 mod min_donation;
 mod multisig;
 mod pause;
+mod pledge_scope;
 mod pledges;
 mod property;
 mod refunds;
 mod rollover;
 mod schema;
 mod split_payouts;
+mod streaming;
 mod stretch;
 mod timelock;
 mod tokens;

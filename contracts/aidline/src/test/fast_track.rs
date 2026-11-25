@@ -20,6 +20,35 @@ fn emergency_fast_track_works_for_emergency_campaign() {
 }
 
 #[test]
+fn emergency_fast_track_capped_by_milestone_zero() {
+    let s = Setup::new();
+    let id = s.client.create_campaign(
+        &s.creator,
+        &s.beneficiary,
+        &s.verifier,
+        &s.token.address,
+        &CampaignKind::Emergency,
+        &String::from_str(&s.env, "ipfs://flood-relief"),
+        &(s.env.ledger().timestamp() + 30 * DAY),
+        &vec![&s.env, 100, 400, 500],
+    );
+    let donor = s.donor(1_000);
+    s.client.donate(&donor, &id, &1_000);
+
+    // 20% of goal is 200, but milestone 0 is only 100.
+    assert_eq!(s.client.emergency_fast_track(&id), 100);
+    assert_eq!(s.client.get_campaign(&id).released, 100);
+
+    // Approving milestone 0 pays nothing more and keeps `released` intact.
+    s.client.approve_milestone(&id, &s.proof());
+    let c = s.client.get_campaign(&id);
+    assert_eq!(c.released, 100);
+    assert_eq!(c.milestones_released, 1);
+    assert_eq!(s.token.balance(&s.beneficiary), 100);
+    assert_eq!(s.token.balance(&s.client.address), 900);
+}
+
+#[test]
 fn emergency_fast_track_limited_by_escrow() {
     let s = Setup::new();
     let id = s.campaign(); // Goal 1000

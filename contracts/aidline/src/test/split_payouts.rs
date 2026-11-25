@@ -11,7 +11,7 @@ fn split_campaign(s: &Setup, shares: &[(Address, u32)]) -> u64 {
             bps: *bps,
         });
     }
-    s.client.create_campaign_with_beneficiaries(
+    s.client.create_campaign_beneficiaries(
         &s.creator,
         &list,
         &s.verifier,
@@ -31,11 +31,15 @@ fn milestone_payout_is_split_and_rounding_dust_goes_to_the_first_beneficiary() {
         Address::generate(&s.env),
         Address::generate(&s.env),
     );
-    let id = split_campaign(&s, &[(a.clone(), 3_333), (b.clone(), 3_333), (c.clone(), 3_334)]);
+    let id = split_campaign(
+        &s,
+        &[(a.clone(), 3_333), (b.clone(), 3_333), (c.clone(), 3_334)],
+    );
     let donor = s.donor(1_000);
     s.client.donate(&donor, &id, &1_000);
 
     s.client.approve_milestone(&id, &s.proof());
+    assert!(!s.env.events().all().events().is_empty());
 
     // 300 splits into 99, 99 and 100; the 2 left over go to the first.
     assert_eq!(s.token.balance(&a), 101);
@@ -45,7 +49,6 @@ fn milestone_payout_is_split_and_rounding_dust_goes_to_the_first_beneficiary() {
         s.token.balance(&a) + s.token.balance(&b) + s.token.balance(&c),
         300
     );
-    assert!(!s.env.events().all().events().is_empty());
     assert_eq!(s.client.get_beneficiaries(&id).len(), 3);
 }
 
@@ -57,7 +60,10 @@ fn emergency_advance_is_split_across_beneficiaries() {
         Address::generate(&s.env),
         Address::generate(&s.env),
     );
-    let id = split_campaign(&s, &[(a.clone(), 3_333), (b.clone(), 3_333), (c.clone(), 3_334)]);
+    let id = split_campaign(
+        &s,
+        &[(a.clone(), 3_333), (b.clone(), 3_333), (c.clone(), 3_334)],
+    );
     let donor = s.donor(500);
     s.client.donate(&donor, &id, &300);
 
@@ -80,7 +86,7 @@ fn shares_must_sum_to_10_000_and_addresses_must_be_distinct() {
                 bps: *bps,
             });
         }
-        s.client.try_create_campaign_with_beneficiaries(
+        s.client.try_create_campaign_beneficiaries(
             &s.creator,
             &list,
             &s.verifier,
@@ -125,7 +131,7 @@ fn the_verifier_cannot_be_a_beneficiary() {
         bps: 5_000,
     });
     assert_eq!(
-        s.client.try_create_campaign_with_beneficiaries(
+        s.client.try_create_campaign_beneficiaries(
             &s.creator,
             &list,
             &s.verifier,

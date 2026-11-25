@@ -1,8 +1,8 @@
 // ─── Issue #118: schema versioning ───────────────────────────────────────────
 
 use super::*;
-use crate::types::DataKey;
 use crate::SCHEMA_VERSION;
+use crate::types::DataKey;
 
 /// Rewrites the stored state as an older build (before versioning) left it.
 fn downgrade_to_unversioned(s: &Setup) {

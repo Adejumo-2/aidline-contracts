@@ -103,7 +103,7 @@ fn queued_slash_runs_the_normal_slash_logic_after_the_delay() {
     s.client.execute_action(&action);
 
     assert_eq!(s.client.get_verifier_bond(&v).unwrap().remaining, 250);
-    assert_eq!(s.client.get_campaign(&id).raised, 150);
+    assert_eq!(s.client.slashed_recovery(&id), 150);
 }
 
 #[test]
