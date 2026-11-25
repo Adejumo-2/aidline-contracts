@@ -140,7 +140,12 @@ The admin can configure an optional platform fee and treasury address to sustain
 | `Treasury` | instance | `Address` treasury address receiving release fees |
 | `CampaignDonors(u64)` | persistent | `Vec<Address>` unique donor addresses in order of first donation |
 
-TTLs are extended on every read and write (instance: 30 days, persistent: 120 days). For long-running campaigns (such as multi-year climate projects) that may remain quiet for months, anyone (such as an off-chain keeper or backend worker) can call the public `extend_campaign_ttl(campaign_id)` entry point without authorization to bump the persistent entry TTL by another 120 days and prevent expiration.
+TTLs are extended on every read and write (instance: 30 days, persistent: 120 days).
+
+- **Instance entry:** every state-changing entry point extends it, either directly (admin, verifier, bond and pledge calls) or by loading a campaign, so a deployment that stops creating campaigns keeps its admin, token and counters (#183).
+- **Milestone due dates:** they are kept alive until a week past the campaign deadline when that is further away than 120 days, capped at the network's maximum TTL. Every read during overdue checks keeps that guarantee, and `extend_deadline` moves it with the new deadline, so a missed milestone always opens refunds (#184).
+- **Keeper call:** for long-running campaigns (such as multi-year climate projects) that may stay quiet for months, anyone (an off-chain keeper, a backend worker, a community member) can call `bump_campaign_ttl(campaign_id)` without authorization. It renews the instance entry, the campaign, its due dates and its other campaign-wide entries (split beneficiaries, stream schedule, donor and pledge lists, start time, slashed recovery, cancel-vote total). Per-donor entries (contributions and cancel votes) are renewed when that donor's entry is read or written. `extend_campaign_ttl` is the same call under its earlier name (#185).
+- **Writes after reads:** an entry point that loads a campaign and writes it back extends its TTL once, on the read (#186).
 
 ## Refund math
 

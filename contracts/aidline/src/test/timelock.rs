@@ -113,9 +113,10 @@ fn queued_reassignment_runs_after_the_delay() {
     let new_verifier = Address::generate(&s.env);
     s.client.add_verifier(&new_verifier);
 
-    let action = s
-        .client
-        .queue_action(&TimelockedAction::ReassignVerifier(id, new_verifier.clone()));
+    let action = s.client.queue_action(&TimelockedAction::ReassignVerifier(
+        id,
+        new_verifier.clone(),
+    ));
     assert_eq!(s.client.get_campaign(&id).verifier, s.verifier);
 
     let now = s.env.ledger().timestamp();
