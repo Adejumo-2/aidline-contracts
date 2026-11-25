@@ -5658,6 +5658,230 @@ mod ttl {
             "instance left with {after} ledgers"
         );
     }
+
+    const DAY_IN_LEDGERS: u32 = 17_280;
+
+    fn instance_ttl(s: &Setup) -> u32 {
+        s.env
+            .as_contract(&s.client.address, || s.env.storage().instance().get_ttl())
+    }
+
+    /// Moves the ledger forward until the instance entry is due for extension.
+    fn age_instance(s: &Setup) {
+        s.env
+            .ledger()
+            .set_sequence_number(s.env.ledger().sequence() + 2 * DAY_IN_LEDGERS);
+        assert!(instance_ttl(s) < INSTANCE_THRESHOLD);
+    }
+
+    /// Issue #183: every state-changing entry point keeps the instance entry
+    /// (admin, token, counters, bond settings) alive, so a deployment that
+    /// keeps running but stops creating campaigns is never bricked by an
+    /// expired instance.
+    #[test]
+    fn state_changing_calls_extend_the_instance_entry() {
+        let s = Setup::new();
+        let id = s.campaign();
+        let donor = s.donor(1_000);
+        let id2 = s.campaign();
+        let donor2 = s.donor(100);
+        s.client.donate(&donor2, &id2, &100);
+        let pledger = s.donor(500);
+        let expiry = s.env.ledger().sequence() + 100 * DAY_IN_LEDGERS;
+        s.token.approve(&pledger, &s.client.address, &200, &expiry);
+        let pledge_id = s.client.create_pledge(&pledger, &id, &200);
+        let bonded = s.bonded_verifier(1_000, 100);
+        let extra = Address::generate(&s.env);
+
+        let steps: [(&str, &dyn Fn()); 18] = [
+            ("cancel_pledge", &|| {
+                s.client.cancel_pledge(&pledger, &pledge_id)
+            }),
+            ("donate", &|| {
+                s.client.donate(&donor, &id, &1_000);
+            }),
+            ("approve_milestone", &|| {
+                s.client.approve_milestone(&id, &s.proof());
+            }),
+            ("cancel_campaign", &|| {
+                s.client.cancel_campaign(&s.creator, &id2)
+            }),
+            ("refund", &|| {
+                s.client.refund(&donor2, &id2);
+            }),
+            ("add_verifier", &|| s.client.add_verifier(&extra)),
+            ("set_verifier_profile", &|| {
+                s.client
+                    .set_verifier_profile(&extra, &String::from_str(&s.env, "ipfs://p"))
+            }),
+            ("remove_verifier", &|| s.client.remove_verifier(&extra)),
+            ("deregister_verifier", &|| {
+                s.client.deregister_verifier(&bonded, &bonded)
+            }),
+            ("withdraw_bond", &|| {
+                s.client.withdraw_bond(&bonded);
+            }),
+            ("set_bond_requirement", &|| {
+                s.client.set_bond_requirement(&0)
+            }),
+            ("set_bond_withdraw_delay", &|| {
+                s.client.set_bond_withdraw_delay(&0)
+            }),
+            ("set_platform_fee", &|| s.client.set_platform_fee(&0)),
+            ("set_treasury", &|| s.client.set_treasury(&extra)),
+            ("add_allowed_token", &|| s.client.add_allowed_token(&extra)),
+            ("remove_allowed_token", &|| {
+                s.client.remove_allowed_token(&extra)
+            }),
+            ("pause", &|| s.client.pause()),
+            ("unpause", &|| s.client.unpause()),
+        ];
+        for (call, run) in steps {
+            age_instance(&s);
+            run();
+            let remaining = instance_ttl(&s);
+            assert!(
+                remaining >= INSTANCE_THRESHOLD,
+                "{call} left the instance with {remaining} ledgers"
+            );
+        }
+
+        // Admin hand-over last, since it changes who the admin is.
+        age_instance(&s);
+        s.client.propose_admin(&extra);
+        assert!(instance_ttl(&s) >= INSTANCE_THRESHOLD, "propose_admin");
+        age_instance(&s);
+        s.client.accept_admin();
+        assert!(instance_ttl(&s) >= INSTANCE_THRESHOLD, "accept_admin");
+        age_instance(&s);
+        s.client.set_admin(&s.admin);
+        assert!(instance_ttl(&s) >= INSTANCE_THRESHOLD, "set_admin");
+    }
+
+    /// Campaign with milestone due dates spread evenly up to a deadline
+    /// `days` from now.
+    fn due_dates_campaign(s: &Setup, days: u64) -> u64 {
+        let now = s.env.ledger().timestamp();
+        s.client.create_campaign_with_due_dates(
+            &s.creator,
+            &s.beneficiary,
+            &s.verifier,
+            &s.token.address,
+            &CampaignKind::Climate,
+            &String::from_str(&s.env, "ipfs://climate"),
+            &(now + days * DAY),
+            &vec![&s.env, 300, 300, 400],
+            &vec![
+                &s.env,
+                now + days * DAY / 3,
+                now + 2 * days * DAY / 3,
+                now + days * DAY,
+            ],
+        )
+    }
+
+    fn ledgers(days: u64) -> u32 {
+        days as u32 * DAY_IN_LEDGERS
+    }
+
+    /// Issue #184: due dates outlive the deadline, so a missed milestone still
+    /// opens refunds on a campaign longer than the default 120-day TTL.
+    #[test]
+    fn milestone_due_dates_stay_alive_until_past_the_deadline() {
+        let s = Setup::new();
+        let short = due_dates_campaign(&s, 90);
+        assert!(ttl(&s, &DataKey::MilestoneDueDates(short)) > ledgers(90));
+
+        let long = due_dates_campaign(&s, 200);
+        let key = DataKey::MilestoneDueDates(long);
+        let remaining = ttl(&s, &key);
+        assert!(
+            remaining > ledgers(200),
+            "due dates expire after {remaining} ledgers, before the 200-day deadline"
+        );
+
+        // Reading them on the way to the deadline keeps that guarantee and
+        // does not push the expiry any further out.
+        s.env
+            .ledger()
+            .set_sequence_number(s.env.ledger().sequence() + ledgers(50));
+        s.env
+            .ledger()
+            .set_timestamp(s.env.ledger().timestamp() + 50 * DAY);
+        let before = ttl(&s, &key);
+        assert_eq!(s.client.milestone_due_dates(&long).len(), 3);
+        assert_eq!(ttl(&s, &key), before);
+        assert!(before > ledgers(150));
+
+        // Extending the deadline extends the due dates with it.
+        let new_deadline = s.client.get_campaign(&long).deadline + 30 * DAY;
+        s.client.extend_deadline(&long, &new_deadline);
+        assert!(ttl(&s, &key) > ledgers(180));
+    }
+
+    /// The deadline-based TTL never exceeds the network's maximum.
+    #[test]
+    fn milestone_due_dates_ttl_is_capped_at_the_network_maximum() {
+        let s = Setup::new();
+        let id = due_dates_campaign(&s, 3 * 365);
+        let max = s
+            .env
+            .as_contract(&s.client.address, || s.env.storage().max_ttl());
+        assert_eq!(ttl(&s, &DataKey::MilestoneDueDates(id)), max);
+    }
+
+    /// Issue #185: anyone can keep a quiet campaign alive without any
+    /// authorization, and the call renews the campaign, its due dates, its
+    /// donor list and the instance entry.
+    #[test]
+    fn bump_campaign_ttl_is_permissionless_and_renews_the_campaign() {
+        let s = Setup::new();
+        let id = due_dates_campaign(&s, 200);
+        let donor = s.donor(1_000);
+        s.client.donate(&donor, &id, &300);
+
+        s.env
+            .ledger()
+            .set_sequence_number(s.env.ledger().sequence() + ledgers(10));
+        let campaign_key = DataKey::Campaign(id);
+        let donors_key = DataKey::CampaignDonors(id);
+        for key in [&campaign_key, &donors_key] {
+            assert!(ttl(&s, key) < PERSISTENT_THRESHOLD, "{key:?} should be due");
+        }
+        assert!(instance_ttl(&s) < INSTANCE_THRESHOLD);
+
+        s.client.bump_campaign_ttl(&id);
+        assert!(s.env.auths().is_empty(), "no authorization is required");
+
+        assert_extended(&s, campaign_key);
+        assert_extended(&s, donors_key);
+        assert!(ttl(&s, &DataKey::MilestoneDueDates(id)) > ledgers(190));
+        assert!(instance_ttl(&s) >= INSTANCE_THRESHOLD);
+    }
+
+    #[test]
+    fn bump_campaign_ttl_rejects_an_unknown_campaign() {
+        let s = Setup::new();
+        assert_eq!(
+            s.client.try_bump_campaign_ttl(&42),
+            Err(Ok(Error::CampaignNotFound))
+        );
+    }
+
+    /// A keeper that keeps calling over two years holds the campaign entry
+    /// past its original 120-day lifetime.
+    #[test]
+    fn repeated_bumps_keep_a_two_year_campaign_alive() {
+        let s = Setup::new();
+        let id = due_dates_campaign(&s, 2 * 365);
+        for _ in 0..8 {
+            s.env
+                .ledger()
+                .set_sequence_number(s.env.ledger().sequence() + ledgers(100));
+            s.client.bump_campaign_ttl(&id);
+        }
+        assert_eq!(s.client.get_campaign(&id).id, id);
+    }
 }
 
 // ─── Issue #116: split payouts ───────────────────────────────────────────────

@@ -6,6 +6,10 @@ use crate::types::{
 };
 
 const DAY_IN_LEDGERS: u32 = 17_280;
+/// Ledger close time `DAY_IN_LEDGERS` assumes. Real ledgers close slightly
+/// slower, so converting seconds with it overestimates the ledgers needed and
+/// errs on the side of keeping data alive longer.
+const LEDGER_SECONDS: u64 = 86_400 / DAY_IN_LEDGERS as u64;
 pub(crate) const INSTANCE_BUMP: u32 = 30 * DAY_IN_LEDGERS;
 pub(crate) const INSTANCE_THRESHOLD: u32 = INSTANCE_BUMP - DAY_IN_LEDGERS;
 pub(crate) const PERSISTENT_BUMP: u32 = 120 * DAY_IN_LEDGERS;
@@ -21,6 +25,35 @@ fn bump(env: &Env, key: &DataKey) {
     env.storage()
         .persistent()
         .extend_ttl(key, PERSISTENT_THRESHOLD, PERSISTENT_BUMP);
+}
+
+/// Extends `key` only if it exists, for optional per-campaign entries.
+fn bump_if_present(env: &Env, key: &DataKey) {
+    if env.storage().persistent().has(key) {
+        bump(env, key);
+    }
+}
+
+/// Ledgers between now and `timestamp`, rounded up (0 once it has passed).
+fn ledgers_until(env: &Env, timestamp: u64) -> u32 {
+    let seconds = timestamp.saturating_sub(env.ledger().timestamp());
+    u32::try_from(seconds.div_ceil(LEDGER_SECONDS)).unwrap_or(u32::MAX)
+}
+
+/// Like [`bump`], but keeps `key` alive until at least a week past
+/// `timestamp` when that is further away than the usual 120 days. The result
+/// is capped at the network's maximum TTL. Repeated calls before `timestamp`
+/// do nothing, because the entry already expires at the same ledger.
+fn bump_until(env: &Env, key: &DataKey, timestamp: u64) {
+    let grace = PERSISTENT_BUMP - PERSISTENT_THRESHOLD;
+    let extend_to = ledgers_until(env, timestamp)
+        .saturating_add(grace)
+        .max(PERSISTENT_BUMP)
+        .min(env.storage().max_ttl());
+    let threshold = extend_to.saturating_sub(grace);
+    env.storage()
+        .persistent()
+        .extend_ttl(key, threshold, extend_to);
 }
 
 pub fn admin(env: &Env) -> Address {
@@ -122,20 +155,43 @@ pub fn campaign(env: &Env, id: u64) -> Result<Campaign, Error> {
     Ok(campaign)
 }
 
-/// Extends the storage TTL for the campaign entry identified by `id`.
-pub fn extend_campaign_ttl(env: &Env, id: u64) -> Result<(), Error> {
-    let key = DataKey::Campaign(id);
-    if !env.storage().persistent().has(&key) {
-        return Err(Error::CampaignNotFound);
+/// Extends the TTL of the instance entry, campaign `id` and the
+/// campaign-wide entries that exist for it: due dates (kept until the
+/// deadline), split beneficiaries, stream schedule, donor and pledge lists,
+/// start time, slashed recovery and the cancel-vote total. Per-donor entries
+/// (contributions, cancel votes) are extended whenever that donor's entry is
+/// read or written.
+pub fn bump_campaign_ttl(env: &Env, id: u64) -> Result<(), Error> {
+    let campaign = campaign(env, id)?;
+    extend_milestone_due_dates_ttl(env, id, campaign.deadline);
+    for key in [
+        DataKey::Beneficiaries(id),
+        DataKey::MilestoneStreamDays(id),
+        DataKey::CampaignDonors(id),
+        DataKey::CampaignPledges(id),
+        DataKey::CampaignStart(id),
+        DataKey::SlashedRecovery(id),
+        DataKey::CancelVoteTotal(id),
+    ] {
+        bump_if_present(env, &key);
     }
-    bump(env, &key);
     Ok(())
 }
 
-pub fn save_campaign(env: &Env, campaign: &Campaign) {
+/// Stores a newly created campaign and extends its TTL.
+pub fn create_campaign(env: &Env, campaign: &Campaign) {
     let key = DataKey::Campaign(campaign.id);
     env.storage().persistent().set(&key, campaign);
     bump(env, &key);
+}
+
+/// Writes back a campaign loaded with [`campaign`] earlier in the same call.
+/// That read already extended the entry's TTL and a write does not shorten
+/// it, so extending again here would only cost another host call (#186).
+pub fn save_campaign(env: &Env, campaign: &Campaign) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::Campaign(campaign.id), campaign);
 }
 
 pub fn verifier_stats(env: &Env, who: &Address) -> VerifierStats {
@@ -475,17 +531,38 @@ pub fn save_pledge(env: &Env, p: &Pledge) {
 
 // ─── Issue #26: Per-milestone due dates storage ──────────────────────────────
 
-pub fn milestone_due_dates(env: &Env, campaign_id: u64) -> Option<soroban_sdk::Vec<u64>> {
+/// Due dates of `campaign_id`. Reading them keeps them alive until past
+/// `deadline`, so an overdue milestone is still detected, and refunds still
+/// open, on a campaign that runs longer than the usual 120-day TTL (#184).
+pub fn milestone_due_dates(
+    env: &Env,
+    campaign_id: u64,
+    deadline: u64,
+) -> Option<soroban_sdk::Vec<u64>> {
     let key = DataKey::MilestoneDueDates(campaign_id);
     let dates = env.storage().persistent().get(&key)?;
-    bump(env, &key);
+    bump_until(env, &key, deadline);
     Some(dates)
 }
 
-pub fn set_milestone_due_dates(env: &Env, campaign_id: u64, due_dates: &soroban_sdk::Vec<u64>) {
+/// Stores the due dates of `campaign_id` with a TTL that lasts past `deadline`.
+pub fn set_milestone_due_dates(
+    env: &Env,
+    campaign_id: u64,
+    due_dates: &soroban_sdk::Vec<u64>,
+    deadline: u64,
+) {
     let key = DataKey::MilestoneDueDates(campaign_id);
     env.storage().persistent().set(&key, due_dates);
-    bump(env, &key);
+    bump_until(env, &key, deadline);
+}
+
+/// Keeps the due dates of `campaign_id`, if it has any, alive past `deadline`.
+pub fn extend_milestone_due_dates_ttl(env: &Env, campaign_id: u64, deadline: u64) {
+    let key = DataKey::MilestoneDueDates(campaign_id);
+    if env.storage().persistent().has(&key) {
+        bump_until(env, &key, deadline);
+    }
 }
 
 // ─── Issue #9: Milestone approvals storage ───────────────────────────────────
