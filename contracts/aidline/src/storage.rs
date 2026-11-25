@@ -77,8 +77,8 @@ pub fn is_verifier(env: &Env, who: &Address) -> bool {
     let key = DataKey::Verifier(who.clone());
     let registered: Option<bool> = env.storage().persistent().get(&key);
     // Reads keep the registration alive, so a verifier that is still in use is
-    // never silently dropped when its entry would otherwise expire (#110).
-    if registered.is_some() {
+    // never silently dropped when its entry would otherwise expire (#110, #181).
+    if registered == Some(true) {
         bump(env, &key);
     }
     registered.unwrap_or(false)
@@ -192,7 +192,7 @@ pub fn set_beneficiaries(env: &Env, campaign_id: u64, list: &Vec<Beneficiary>) {
 pub fn contribution(env: &Env, id: u64, donor: &Address) -> i128 {
     let key = DataKey::Contribution(id, donor.clone());
     let amount: Option<i128> = env.storage().persistent().get(&key);
-    if amount.is_some() {
+    if amount.is_some_and(|a| a > 0) {
         bump(env, &key);
     }
     amount.unwrap_or(0)
