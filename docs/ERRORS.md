@@ -45,6 +45,11 @@ Integrators and client applications encountering numeric error codes (e.g. `#12`
 | **35** | `UriTooLong` | `create_campaign`, `create_campaign_with_due_dates`, `create_multisig_campaign`, `update_metadata`, `approve_milestone`, `approve_milestone_multisig`, `reject_milestone` | Ensure metadata, proof, and rejection details URIs do not exceed 256 bytes (`MAX_URI_LENGTH`). Use compact IPFS CIDs or abbreviated URLs. |
 | **36** | `ConflictOfInterest` | `create_campaign`, `create_campaign_with_due_dates`, `create_multisig_campaign` | The assigned verifier cannot be the campaign creator or beneficiary. For multisig campaigns, no verifier in the list may be the creator or beneficiary. Designate independent verifiers. |
 | **37** | `DonationBelowMinimum` | `donate` | Increase donation amount to meet or exceed the campaign's minimum donation requirement (`min_donation`). A donation below the minimum is only accepted if it reaches or exceeds the remaining goal amount. |
+| **43** | `ActionNotFound` | `cancel_action`, `execute_action` | No queued action exists with that id. It may have been executed or cancelled already. |
+| **44** | `TimelockNotReady` | `execute_action` | Wait until the action's `eta` (queue time plus `TIMELOCK_DELAY`) has passed. |
+| **45** | `ActionExpired` | `execute_action` | The grace period (`TIMELOCK_GRACE_PERIOD`) after `eta` has passed. Cancel the action and queue it again. |
+| **46** | `SameCampaign` | `rollover_refund` | Pick a target campaign different from the one being refunded. |
+| **47** | `TokenMismatch` | `rollover_refund` | Both campaigns must use the same token. Claim a normal `refund` instead. |
 | **48** | `InvalidBeneficiaries` | `create_campaign_with_beneficiaries` | Provide 1 to 10 beneficiaries with positive shares in basis points that sum to exactly 10,000 and distinct addresses. |
 | **58** | `InvalidRejectionReason` | `reject_milestone` | Provide a valid `RejectionReason` code (`1` = `IncompleteWork`, `2` = `FraudDetected`, `3` = `InsufficientProof`, `4` = `BudgetExceeded`). |
 | **59** | `InvalidMetadataUri` | `update_metadata` | Provide a non-empty metadata URI (`1..=256` bytes). |

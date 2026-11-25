@@ -13,3 +13,4 @@ To add one, copy the layout of an existing record, use the next number and open 
 | [0005](0005-sponsor-matching-pools.md)        | Sponsor matching pools                             | Accepted |
 | [0006](0006-emergency-fast-track.md)         | Emergency fast track and the 20 percent cap        | Accepted |
 | [0007](0007-streaming-release.md)            | Streaming release and unvested funds on cancel     | Accepted |
+| [0008](0008-admin-timelock.md)               | Timelock for sensitive admin actions               | Accepted |

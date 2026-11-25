@@ -342,7 +342,27 @@ Emitted when the campaign creator grants a one-time deadline extension.
 - **Data**: `(old_deadline: u64, new_deadline: u64)`
 - **Emitted by**: `extend_deadline`, `extend_deadline_by`
 
-### 31. `BeneficiaryPaid`
+### 31. `ActionQueued`
+Emitted when the admin queues a timelocked action.
+- **Fields in code**: `action_id: u64`, `eta: u64`
+- **Topics**: `(symbol_short!("tl_queue"), action_id: u64)`
+- **Data**: `eta: u64`
+- **Emitted by**: `queue_action`
+
+### 32. `ActionCancelled`
+Emitted when the admin cancels a queued action.
+- **Fields in code**: `action_id: u64`
+- **Topics**: `(symbol_short!("tl_cancel"), action_id: u64)`
+- **Data**: `()`
+- **Emitted by**: `cancel_action`
+
+### 33. `ActionExecuted`
+Emitted when a queued action is executed after its delay.
+- **Fields in code**: `action_id: u64`
+- **Topics**: `(symbol_short!("tl_exec"), action_id: u64)`
+- **Data**: `()`
+- **Emitted by**: `execute_action`
+### 34. `BeneficiaryPaid`
 Emitted once per recipient when a split-payout campaign pays out a milestone or the emergency advance (#116).
 - **Fields in code**:
   1. `campaign_id: u64`
