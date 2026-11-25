@@ -195,7 +195,7 @@ fn cancelled_campaign_rejects_new_activity() {
     let s = Setup::new();
     let id = s.campaign();
     let donor = s.donor(1_000);
-    let sponsor = s.donor(10_000);
+    let sponsor = s.donor(10_000_000);
 
     s.client.cancel_campaign(&s.creator, &id);
     assert_eq!(s.client.get_campaign(&id).status, CampaignStatus::Cancelled);
@@ -218,7 +218,7 @@ fn cancelled_campaign_rejects_new_activity() {
 
     assert_eq!(
         s.client
-            .try_deposit_sponsor_pool(&sponsor, &id, &5_000, &500, &500),
+            .try_deposit_sponsor_pool(&sponsor, &id, &5_000, &1_000_000, &1_000_000),
         Err(Ok(Error::CampaignNotActive))
     );
 }
@@ -228,7 +228,7 @@ fn completed_campaign_rejects_new_activity() {
     let s = Setup::new();
     let id = s.campaign();
     let donor = s.donor(1_000);
-    let sponsor = s.donor(10_000);
+    let sponsor = s.donor(10_000_000);
 
     // Fully fund and release all milestones
     s.client.donate(&donor, &id, &1_000);
@@ -251,7 +251,7 @@ fn completed_campaign_rejects_new_activity() {
 
     assert_eq!(
         s.client
-            .try_deposit_sponsor_pool(&sponsor, &id, &5_000, &500, &500),
+            .try_deposit_sponsor_pool(&sponsor, &id, &5_000, &1_000_000, &1_000_000),
         Err(Ok(Error::CampaignNotActive))
     );
     // Note: try_approve_milestone against a Completed campaign is already tested in milestones_release_in_order_and_complete.

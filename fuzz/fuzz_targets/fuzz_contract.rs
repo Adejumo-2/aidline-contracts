@@ -381,8 +381,7 @@ fuzz_target!(|data: &[u8]| {
                 cap_mod,
             } => {
                 if !sponsor_pool_active {
-                    // Keep cap small enough to avoid goal-exceeding issues
-                    let cap = ((cap_mod as i128 % 300) + 1).min(goal);
+                    let cap = 1_000_000 + (cap_mod as i128 % 1_000_000);
                     let ratio_bps = ((ratio_bps_mod as u32) % 10_000 + 1).min(10_000);
                     if client
                         .try_deposit_sponsor_pool(&sponsor, &campaign_id, &ratio_bps, &cap, &cap)

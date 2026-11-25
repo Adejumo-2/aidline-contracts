@@ -13,6 +13,9 @@ mod storage;
 mod types;
 
 #[cfg(test)]
+extern crate std;
+
+#[cfg(test)]
 mod test;
 
 use soroban_sdk::{
@@ -27,16 +30,16 @@ pub use types::{
 };
 
 use events::{
-    ActionCancelled, ActionExecuted, ActionQueued, AdminAccepted, AdminChanged, AdminProposed,
-    BeneficiaryPaid, BondSlashed, BondWithdrawn, CampaignCancelled, CampaignCancelledWithReason,
-    CampaignCreated, CancelVoteWithdrawn, CancelVoted, ContractPaused, ContractUnpaused,
-    ContractUpgraded, DeadlineExtended, Donated, EmergencyAdvanceReleased, MatchingApplied,
-    MetadataUpdated, Migrated, MilestoneApproved, MilestoneBlocked, MilestoneFinalized,
-    MilestoneProposed, MilestoneRejected, MilestoneReleased, PlatformFeeUpdated, PledgeCancelled,
-    PledgeCreated, PledgePulled, PledgeSettlement, PledgeSkipped, Refunded, SlasherChanged,
-    SponsorPoolDeposited, SponsorPoolReturned, StreamClaimed, TokenAllowlistUpdated,
-    TreasuryUpdated, VerifierBondPosted, VerifierDeregistered, VerifierProfileUpdated,
-    VerifierReassigned, VerifierUpdated,
+    ActionCancelled, ActionExecuted, ActionQueued, AdminAccepted, AdminChanged, AdminNominated,
+    AdminProposed, BeneficiaryPaid, BondSlashed, BondWithdrawn, CampaignCancelled,
+    CampaignCancelledWithReason, CampaignCreated, CancelVoteWithdrawn, CancelVoted, ContractPaused,
+    ContractUnpaused, ContractUpgraded, DeadlineExtended, Donated, EmergencyAdvanceReleased,
+    MatchingApplied, MetadataUpdated, Migrated, MilestoneApproved, MilestoneBlocked,
+    MilestoneFinalized, MilestoneProposed, MilestoneRejected, MilestoneReleased,
+    PlatformFeeUpdated, PledgeCancelled, PledgeCreated, PledgePulled, PledgeSettlement,
+    PledgeSkipped, Refunded, SlasherChanged, SponsorPoolDeposited, SponsorPoolReturned,
+    StreamClaimed, TokenAllowlistUpdated, TreasuryUpdated, VerifierBondPosted,
+    VerifierDeregistered, VerifierProfileUpdated, VerifierReassigned, VerifierUpdated,
 };
 
 const MAX_MILESTONES: u32 = 20;
@@ -46,6 +49,8 @@ const MAX_URI_LENGTH: u32 = 256;
 pub const MAX_PROOF_URI_LENGTH: u32 = 500;
 /// Maximum matching ratio (100 % = 10 000 bps).
 const MAX_RATIO_BPS: u32 = 10_000;
+/// Minimum deposit and cap for a sponsor matching pool (Issue #158).
+pub const MIN_SPONSOR_POOL: i128 = 1_000_000;
 /// Maximum platform fee in basis points (200 bps = 2.00%).
 const MAX_PLATFORM_FEE_BPS: u32 = 200;
 /// Reason code emitted in PledgeSkipped when the donor has no allowance.
@@ -225,7 +230,13 @@ impl Aidline {
         Ok(())
     }
 
-    /// Transfers admin control to `new_admin`.
+    /// Transfers admin control to `new_admin` in a single step.
+    ///
+    /// # Safety Warning (Deprecated Pattern)
+    /// Direct single-step transfer permanently overwrites the admin address
+    /// without verifying that `new_admin` can sign transactions. Prefer the
+    /// two-step transfer via [`nominate_admin`] (or [`propose_admin`]) and
+    /// [`accept_admin`] to avoid accidental irrevocable loss of admin control.
     ///
     /// Only the current admin may call this. Emits [`AdminChanged`] with
     /// both the old and new admin addresses so indexers can track the change.
@@ -242,6 +253,27 @@ impl Aidline {
         AdminChanged {
             old: old_admin,
             new: new_admin,
+        }
+        .publish(&env);
+    }
+
+    /// Nominates `candidate` to take over admin control in a two-step transfer.
+    ///
+    /// Only the current admin may call this. The current admin retains full
+    /// administrative authority until `candidate` explicitly accepts via
+    /// [`accept_admin`]. Calling this again replaces any pending nomination.
+    /// Emits [`AdminNominated`].
+    ///
+    /// # Errors
+    /// - [`Error::Unauthorized`]: caller is not the current admin.
+    pub fn nominate_admin(env: Env, candidate: Address) {
+        let current_admin = storage::admin(&env);
+        current_admin.require_auth();
+        storage::bump_instance(&env);
+        storage::set_pending_admin(&env, &candidate);
+        AdminNominated {
+            current_admin,
+            pending_admin: candidate,
         }
         .publish(&env);
     }
@@ -301,7 +333,8 @@ impl Aidline {
     /// Pauses the contract in emergencies.
     ///
     /// Only the admin may call this. While paused, `donate`, `approve_milestone`,
-    /// `create_campaign`, and `emergency_fast_track` fail with [`Error::Paused`].
+    /// `create_campaign`, `emergency_fast_track`, and `deposit_sponsor_pool`
+    /// fail with [`Error::Paused`].
     /// Refunds keep working so donors are never locked in. Emits [`ContractPaused`].
     ///
     /// # Errors
@@ -557,21 +590,26 @@ impl Aidline {
 
     /// Deregisters `verifier`, beginning the bond withdrawal delay countdown.
     ///
-    /// Either the verifier themselves or the admin may call this. The verifier
-    /// is removed from the active registry immediately, but their bond enters
-    /// `PendingWithdrawal` status and cannot be withdrawn until the delay set
-    /// by [`set_bond_withdraw_delay`] has elapsed. Emits [`VerifierDeregistered`].
+    /// Either the verifier themselves or the admin may call this. Explicitly
+    /// requires `verifier.require_auth()` for self-deregistration or
+    /// `admin.require_auth()` when `caller != verifier`. The verifier is
+    /// removed from the active registry immediately, and their bond enters
+    /// `PendingWithdrawal` status until the delay set by
+    /// [`set_bond_withdraw_delay`] has elapsed. Emits [`VerifierDeregistered`].
     ///
     /// # Errors
     /// - [`Error::Unauthorized`]: `caller` is neither `verifier` nor the admin.
     /// - [`Error::NotVerifier`]: `verifier` is not currently registered.
     pub fn deregister_verifier(env: Env, caller: Address, verifier: Address) -> Result<(), Error> {
-        caller.require_auth();
-        storage::bump_instance(&env);
         let admin = storage::admin(&env);
-        if caller != verifier && caller != admin {
+        if caller == verifier {
+            verifier.require_auth();
+        } else if caller == admin {
+            admin.require_auth();
+        } else {
             return Err(Error::Unauthorized);
         }
+        storage::bump_instance(&env);
 
         if !storage::is_verifier(&env, &verifier) {
             return Err(Error::NotVerifier);
@@ -1272,7 +1310,7 @@ impl Aidline {
     /// # Errors
     /// - [`Error::InvalidChallengeWindow`]: `challenge_window` exceeds
     ///   [`MAX_CHALLENGE_WINDOW`].
-    pub fn create_campaign_with_challenge_window(
+    pub fn create_campaign_challenge_window(
         env: Env,
         creator: Address,
         beneficiary: Address,
@@ -1356,7 +1394,13 @@ impl Aidline {
             index: pending.index,
         }
         .publish(&env);
-        Self::release_milestone(&env, campaign, pending.index, milestone_amount, pending.proof_uri)
+        Self::release_milestone(
+            &env,
+            campaign,
+            pending.index,
+            milestone_amount,
+            pending.proof_uri,
+        )
     }
 
     /// Blocks a proposed approval during its challenge window (Issue #115).
@@ -1639,8 +1683,10 @@ impl Aidline {
     /// Emits [`SponsorPoolDeposited`].
     ///
     /// # Errors
+    /// - [`Error::Paused`]: the contract is currently paused.
     /// - [`Error::InvalidMatchingConfig`]: `ratio_bps` is 0 or above 10 000,
-    ///   `cap` or `amount` are non-positive, or `amount != cap`.
+    ///   `cap` or `amount` are non-positive, `amount < MIN_SPONSOR_POOL`, or
+    ///   `amount != cap`.
     /// - [`Error::CampaignNotFound`]: no campaign with `campaign_id` exists.
     /// - [`Error::CampaignNotActive`] / [`Error::CampaignExpired`] / [`Error::MilestoneOverdue`]: campaign
     ///   is not open.
@@ -1657,10 +1703,13 @@ impl Aidline {
         Self::ensure_current_schema(&env)?;
         sponsor.require_auth();
 
+        if storage::is_paused(&env) {
+            return Err(Error::Paused);
+        }
         if ratio_bps == 0 || ratio_bps > MAX_RATIO_BPS {
             return Err(Error::InvalidMatchingConfig);
         }
-        if cap <= 0 || amount <= 0 {
+        if cap <= 0 || amount <= 0 || amount < MIN_SPONSOR_POOL {
             return Err(Error::InvalidMatchingConfig);
         }
         if amount != cap {

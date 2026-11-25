@@ -6,7 +6,7 @@ use crate::MAX_CHALLENGE_WINDOW;
 const WINDOW: u64 = 2 * DAY;
 
 fn windowed(s: &Setup, window: u64) -> u64 {
-    s.client.create_campaign_with_challenge_window(
+    s.client.create_campaign_challenge_window(
         &s.creator,
         &s.beneficiary,
         &s.verifier,
@@ -41,7 +41,10 @@ fn funds_move_only_when_the_proposal_is_finalized_after_the_window() {
             .propose_milestone_approval(&id, &s.verifier, &s.proof()),
         0
     );
-    assert!(!s.env.events().all().events().is_empty(), "MilestoneProposed");
+    assert!(
+        !s.env.events().all().events().is_empty(),
+        "MilestoneProposed"
+    );
     assert_eq!(s.token.balance(&s.beneficiary), 0);
     assert_eq!(s.client.get_campaign(&id).milestones_released, 0);
     assert!(s.client.pending_approval(&id).is_some());
@@ -100,7 +103,10 @@ fn the_admin_can_block_and_the_approval_can_be_proposed_again() {
     s.client.approve_milestone(&id, &s.proof());
 
     assert!(s.client.block_milestone(&s.admin, &id));
-    assert!(!s.env.events().all().events().is_empty(), "MilestoneBlocked");
+    assert!(
+        !s.env.events().all().events().is_empty(),
+        "MilestoneBlocked"
+    );
     assert!(s.client.pending_approval(&id).is_none());
     assert_eq!(s.token.balance(&s.beneficiary), 0);
     assert_eq!(
@@ -162,20 +168,23 @@ fn blocking_after_the_window_is_too_late() {
 #[test]
 fn the_window_has_a_maximum() {
     let s = Setup::new();
-    assert!(s.client.try_create_campaign_with_challenge_window(
-        &s.creator,
-        &s.beneficiary,
-        &s.verifier,
-        &s.token.address,
-        &CampaignKind::Emergency,
-        &String::from_str(&s.env, "ipfs://max"),
-        &(s.env.ledger().timestamp() + 30 * DAY),
-        &vec![&s.env, 300, 300, 400],
-        &MAX_CHALLENGE_WINDOW,
-    )
-    .is_ok());
+    assert!(
+        s.client
+            .try_create_campaign_challenge_window(
+                &s.creator,
+                &s.beneficiary,
+                &s.verifier,
+                &s.token.address,
+                &CampaignKind::Emergency,
+                &String::from_str(&s.env, "ipfs://max"),
+                &(s.env.ledger().timestamp() + 30 * DAY),
+                &vec![&s.env, 300, 300, 400],
+                &MAX_CHALLENGE_WINDOW,
+            )
+            .is_ok()
+    );
     assert_eq!(
-        s.client.try_create_campaign_with_challenge_window(
+        s.client.try_create_campaign_challenge_window(
             &s.creator,
             &s.beneficiary,
             &s.verifier,

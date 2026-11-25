@@ -141,4 +141,3 @@ fn reassigning_to_the_beneficiary_or_creator_is_rejected() {
     assert_eq!(s.client.get_campaign(&id).verifier, s.verifier);
     assert_eq!(s.client.verifier_reassignments(&id), 0);
 }
-

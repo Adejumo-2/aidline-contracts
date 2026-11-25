@@ -69,11 +69,11 @@ fn finished_pledges_leave_the_campaign_list() {
     let p = pledger(&s);
     let id = pledged_campaign(&s, &p, 2);
     let donor = s.donor(1_000);
-    s.client.donate(&donor, &id, &1_000);
+    s.client.donate(&donor, &id, &998);
 
     s.client.approve_milestone(&id, &s.proof());
     // Both 1-token pledges were fully pulled, so the next approval has none
     // left to read and succeeds with only escrowed funds.
     s.client.approve_milestone(&id, &s.proof());
-    assert_eq!(s.client.get_campaign(&id).raised, 1_002);
+    assert_eq!(s.client.get_campaign(&id).raised, 1_000);
 }

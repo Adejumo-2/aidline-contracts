@@ -143,7 +143,7 @@ fn overdue_milestone_blocks_new_donations_sponsor_pools_and_pledges() {
 
     let donor_a = s.donor(500);
     let donor_b = s.donor(500);
-    let sponsor = s.donor(1_000);
+    let sponsor = s.donor(1_000_000);
     let pledger = s.donor(500);
 
     // Initial donation succeeds before milestone is overdue
@@ -161,7 +161,7 @@ fn overdue_milestone_blocks_new_donations_sponsor_pools_and_pledges() {
     // Deposit sponsor pool fails with MilestoneOverdue
     assert_eq!(
         s.client
-            .try_deposit_sponsor_pool(&sponsor, &id, &1_000, &500, &500),
+            .try_deposit_sponsor_pool(&sponsor, &id, &1_000, &1_000_000, &1_000_000),
         Err(Ok(Error::MilestoneOverdue))
     );
 

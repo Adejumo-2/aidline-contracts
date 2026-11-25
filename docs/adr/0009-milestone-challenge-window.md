@@ -8,7 +8,7 @@ Approval pays the beneficiary in the same transaction. If a verifier key is comp
 
 ## Decision
 
-A campaign can be created with a challenge window (`create_campaign_with_challenge_window`, at most 14 days). With a window above zero, an approval that reaches the verifier threshold becomes a **proposal** instead of a payout:
+A campaign can be created with a challenge window (`create_campaign_challenge_window`, at most 14 days). With a window above zero, an approval that reaches the verifier threshold becomes a **proposal** instead of a payout:
 
 1. `approve_milestone`, or `propose_milestone_approval` for multisig verifiers, records the proposal and emits `proposed` with the time the window ends. No funds move and the milestone stays pending. Only one proposal can wait at a time.
 2. During the window the admin can `block_milestone` alone. Donors can also block: each donor's vote counts for their contribution, once per proposal, and the proposal is blocked when the votes reach 30% of `raised`. A blocked approval is removed, its approvals are cleared and a `blocked` event is emitted, so the verifier can propose it again.

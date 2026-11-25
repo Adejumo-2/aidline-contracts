@@ -73,6 +73,97 @@ fn only_the_verifier_or_admin_can_deregister() {
 }
 
 #[test]
+fn deregister_verifier_enforces_explicit_caller_auth() {
+    let s = Setup::new();
+    let v1 = s.bonded_verifier(1_000, 100);
+    let v2 = s.bonded_verifier(1_000, 100);
+    let stranger = Address::generate(&s.env);
+
+    // Self-deregistration fails if only admin signed (verifier auth missing)
+    let admin_auth_for_self = MockAuth {
+        address: &s.admin,
+        invoke: &MockAuthInvoke {
+            contract: &s.client.address,
+            fn_name: "deregister_verifier",
+            args: (v1.clone(), v1.clone()).into_val(&s.env),
+            sub_invokes: &[],
+        },
+    };
+    let res = s
+        .client
+        .mock_auths(&[admin_auth_for_self])
+        .try_deregister_verifier(&v1, &v1);
+    assert_eq!(res.unwrap_err(), Err(InvokeError::Abort));
+    assert!(s.client.is_verifier(&v1));
+
+    // Self-deregistration succeeds with verifier auth
+    let verifier_auth = MockAuth {
+        address: &v1,
+        invoke: &MockAuthInvoke {
+            contract: &s.client.address,
+            fn_name: "deregister_verifier",
+            args: (v1.clone(), v1.clone()).into_val(&s.env),
+            sub_invokes: &[],
+        },
+    };
+    s.client
+        .mock_auths(&[verifier_auth])
+        .deregister_verifier(&v1, &v1);
+    assert!(!s.client.is_verifier(&v1));
+
+    // Admin-initiated deregistration fails if only verifier signed (admin auth missing)
+    let verifier_auth_for_admin = MockAuth {
+        address: &v2,
+        invoke: &MockAuthInvoke {
+            contract: &s.client.address,
+            fn_name: "deregister_verifier",
+            args: (s.admin.clone(), v2.clone()).into_val(&s.env),
+            sub_invokes: &[],
+        },
+    };
+    let res = s
+        .client
+        .mock_auths(&[verifier_auth_for_admin])
+        .try_deregister_verifier(&s.admin, &v2);
+    assert_eq!(res.unwrap_err(), Err(InvokeError::Abort));
+    assert!(s.client.is_verifier(&v2));
+
+    // Admin-initiated deregistration succeeds with admin auth
+    let admin_auth = MockAuth {
+        address: &s.admin,
+        invoke: &MockAuthInvoke {
+            contract: &s.client.address,
+            fn_name: "deregister_verifier",
+            args: (s.admin.clone(), v2.clone()).into_val(&s.env),
+            sub_invokes: &[],
+        },
+    };
+    s.client
+        .mock_auths(&[admin_auth])
+        .deregister_verifier(&s.admin, &v2);
+    assert!(!s.client.is_verifier(&v2));
+
+    // Stranger cannot deregister even with their own auth
+    let v3 = s.bonded_verifier(1_000, 100);
+    let stranger_auth = MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &s.client.address,
+            fn_name: "deregister_verifier",
+            args: (stranger.clone(), v3.clone()).into_val(&s.env),
+            sub_invokes: &[],
+        },
+    };
+    assert_eq!(
+        s.client
+            .mock_auths(&[stranger_auth])
+            .try_deregister_verifier(&stranger, &v3),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert!(s.client.is_verifier(&v3));
+}
+
+#[test]
 fn deregistering_an_unregistered_address_fails() {
     let s = Setup::new();
     let nobody = Address::generate(&s.env);
