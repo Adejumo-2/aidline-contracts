@@ -23,6 +23,34 @@ pub enum CampaignStatus {
     Expired,
 }
 
+/// Structured reason codes for a verifier rejecting a pending milestone (Issue #161).
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum RejectionReason {
+    /// Submitted deliverables are incomplete or do not meet milestone scope.
+    IncompleteWork = 1,
+    /// Fraudulent activity or falsified evidence detected; triggers campaign cancellation.
+    FraudDetected = 2,
+    /// Provided proof is insufficient to verify milestone completion.
+    InsufficientProof = 3,
+    /// Reported expenditures exceed the milestone budget or allocation.
+    BudgetExceeded = 4,
+}
+
+impl RejectionReason {
+    /// Converts a numeric reason code into a [`RejectionReason`] variant.
+    pub fn from_code(code: u32) -> Option<Self> {
+        match code {
+            1 => Some(Self::IncompleteWork),
+            2 => Some(Self::FraudDetected),
+            3 => Some(Self::InsufficientProof),
+            4 => Some(Self::BudgetExceeded),
+            _ => None,
+        }
+    }
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Campaign {

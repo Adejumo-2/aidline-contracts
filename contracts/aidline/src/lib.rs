@@ -21,8 +21,8 @@ use soroban_sdk::{
 
 pub use errors::Error;
 pub use types::{
-    Beneficiary, BondStatus, Campaign, CampaignKind, CampaignStatus, Pledge, SponsorPool, Stream,
-    VerifierBond, VerifierStats,
+    Beneficiary, BondStatus, Campaign, CampaignKind, CampaignStatus, Pledge, RejectionReason,
+    SponsorPool, Stream, VerifierBond, VerifierStats,
 };
 
 use events::{
@@ -314,6 +314,7 @@ impl Aidline {
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         let admin = storage::admin(&env);
         admin.require_auth();
+        storage::bump_instance(&env);
         env.deployer()
             .update_current_contract(ContractExecutable::Wasm(new_wasm_hash.clone()));
         ContractUpgraded { new_wasm_hash }.publish(&env);
@@ -1149,6 +1150,8 @@ impl Aidline {
     /// donations have been received (`raised == 0`). Emits [`MetadataUpdated`].
     ///
     /// # Errors
+    /// - [`Error::MigrationPending`]: contract storage migration is pending.
+    /// - [`Error::InvalidMetadataUri`]: `new_metadata_uri` is empty.
     /// - [`Error::UriTooLong`]: `new_metadata_uri` exceeds [`MAX_URI_LENGTH`] bytes.
     /// - [`Error::CampaignNotFound`]: no campaign with `campaign_id` exists.
     /// - [`Error::CampaignNotActive`]: campaign is not currently active.
@@ -1159,10 +1162,14 @@ impl Aidline {
         campaign_id: u64,
         new_metadata_uri: String,
     ) -> Result<(), Error> {
+        Self::ensure_current_schema(&env)?;
         let mut campaign = storage::campaign(&env, campaign_id)?;
         campaign.creator.require_auth();
         Self::ensure_open(&env, &campaign)?;
 
+        if new_metadata_uri.is_empty() {
+            return Err(Error::InvalidMetadataUri);
+        }
         if new_metadata_uri.len() > MAX_URI_LENGTH {
             return Err(Error::UriTooLong);
         }
@@ -1183,7 +1190,7 @@ impl Aidline {
         Ok(())
     }
 
-    /// Extends an active campaign's deadline by up to 30 days.
+    /// Extends an active campaign's deadline to `new_deadline` (at most 30 days).
     ///
     /// Only the campaign's creator may call this. An extension can be
     /// granted at most once per campaign, and only while the campaign is
@@ -1191,6 +1198,7 @@ impl Aidline {
     /// [`DeadlineExtended`].
     ///
     /// # Errors
+    /// - [`Error::MigrationPending`]: contract storage migration is pending.
     /// - [`Error::CampaignNotFound`]: no campaign with `campaign_id` exists.
     /// - [`Error::CampaignNotActive`]: campaign is not in `Active` status.
     /// - [`Error::CampaignExpired`]: current deadline has already elapsed.
@@ -1199,31 +1207,72 @@ impl Aidline {
     /// - [`Error::InvalidDeadlineExtension`]: `new_deadline` is not after the
     ///   current deadline or extends it by more than 30 days.
     pub fn extend_deadline(env: Env, campaign_id: u64, new_deadline: u64) -> Result<(), Error> {
-        let mut campaign = storage::campaign(&env, campaign_id)?;
+        Self::internal_extend_deadline(&env, campaign_id, |current| {
+            let max_deadline = current.saturating_add(MAX_DEADLINE_EXTENSION);
+            if new_deadline <= current || new_deadline > max_deadline {
+                return Err(Error::InvalidDeadlineExtension);
+            }
+            Ok(new_deadline)
+        })
+    }
+
+    /// Extends an active campaign's deadline by `additional_seconds` (1 to 30 days).
+    ///
+    /// Only the campaign's creator may call this. An extension can be
+    /// granted at most once per campaign, and only while the campaign is
+    /// active and before the current deadline has elapsed. Emits
+    /// [`DeadlineExtended`].
+    ///
+    /// # Errors
+    /// - [`Error::MigrationPending`]: contract storage migration is pending.
+    /// - [`Error::CampaignNotFound`]: no campaign with `campaign_id` exists.
+    /// - [`Error::CampaignNotActive`]: campaign is not in `Active` status.
+    /// - [`Error::CampaignExpired`]: current deadline has already elapsed.
+    /// - [`Error::DeadlineAlreadyExtended`]: campaign has already used its
+    ///   one-time extension.
+    /// - [`Error::InvalidDeadlineExtension`]: `additional_seconds` is zero,
+    ///   exceeds 30 days, or overflows `u64`.
+    pub fn extend_deadline_by(
+        env: Env,
+        campaign_id: u64,
+        additional_seconds: u64,
+    ) -> Result<(), Error> {
+        Self::internal_extend_deadline(&env, campaign_id, |current| {
+            if additional_seconds == 0 || additional_seconds > MAX_DEADLINE_EXTENSION {
+                return Err(Error::InvalidDeadlineExtension);
+            }
+            current
+                .checked_add(additional_seconds)
+                .ok_or(Error::InvalidDeadlineExtension)
+        })
+    }
+
+    fn internal_extend_deadline(
+        env: &Env,
+        campaign_id: u64,
+        compute_new_deadline: impl FnOnce(u64) -> Result<u64, Error>,
+    ) -> Result<(), Error> {
+        Self::ensure_current_schema(env)?;
+        let mut campaign = storage::campaign(env, campaign_id)?;
         campaign.creator.require_auth();
-        Self::ensure_open(&env, &campaign)?;
+        Self::ensure_open(env, &campaign)?;
 
         if campaign.deadline_extended {
             return Err(Error::DeadlineAlreadyExtended);
         }
 
-        if new_deadline <= campaign.deadline
-            || new_deadline > campaign.deadline + MAX_DEADLINE_EXTENSION
-        {
-            return Err(Error::InvalidDeadlineExtension);
-        }
-
         let old_deadline = campaign.deadline;
+        let new_deadline = compute_new_deadline(old_deadline)?;
         campaign.deadline = new_deadline;
         campaign.deadline_extended = true;
-        storage::save_campaign(&env, &campaign);
+        storage::save_campaign(env, &campaign);
 
         DeadlineExtended {
             campaign_id,
             old_deadline,
             new_deadline,
         }
-        .publish(&env);
+        .publish(env);
 
         Ok(())
     }
@@ -1905,23 +1954,37 @@ impl Aidline {
         Self::internal_approve_milestone(&env, campaign_id, campaign.verifier.clone(), proof_uri)
     }
 
-    /// Records a verifier's rejection of the next pending milestone with an explanatory reason URI.
+    /// Records a verifier's rejection of the next pending milestone with a structured reason code
+    /// and an explanatory details URI.
     ///
     /// Only the campaign's registered verifier may call this. Does not move funds or advance
-    /// milestone progress. Emits [`MilestoneRejected`].
+    /// milestone progress. If `reason` corresponds to [`RejectionReason::FraudDetected`] (`2`),
+    /// the campaign is immediately cancelled so donors can reclaim unreleased funds.
+    /// Emits [`MilestoneRejected`] (and [`CampaignCancelled`] when fraud is reported).
     ///
     /// # Errors
-    /// - [`Error::UriTooLong`]: `reason_uri` exceeds [`MAX_URI_LENGTH`] bytes.
+    /// - [`Error::MigrationPending`]: contract storage migration is pending.
+    /// - [`Error::UriTooLong`]: `details_uri` exceeds [`MAX_URI_LENGTH`] bytes.
+    /// - [`Error::InvalidRejectionReason`]: `reason` is not a valid [`RejectionReason`] code (`1..=4`).
     /// - [`Error::CampaignNotFound`]: no campaign with `campaign_id` exists.
     /// - [`Error::NotVerifier`]: the campaign verifier is no longer registered.
     /// - [`Error::CampaignNotActive`] / [`Error::CampaignExpired`]: campaign is not open.
     /// - [`Error::NoMilestonesLeft`]: all milestones have already been released.
-    pub fn reject_milestone(env: Env, campaign_id: u64, reason_uri: String) -> Result<(), Error> {
-        if reason_uri.len() > MAX_URI_LENGTH {
+    pub fn reject_milestone(
+        env: Env,
+        campaign_id: u64,
+        reason: u32,
+        details_uri: String,
+    ) -> Result<(), Error> {
+        Self::ensure_current_schema(&env)?;
+        if details_uri.len() > MAX_URI_LENGTH {
             return Err(Error::UriTooLong);
         }
 
-        let campaign = storage::campaign(&env, campaign_id)?;
+        let rejection_reason =
+            RejectionReason::from_code(reason).ok_or(Error::InvalidRejectionReason)?;
+
+        let mut campaign = storage::campaign(&env, campaign_id)?;
         campaign.verifier.require_auth();
 
         if !storage::is_verifier(&env, &campaign.verifier) {
@@ -1938,9 +2001,14 @@ impl Aidline {
         MilestoneRejected {
             campaign_id,
             index,
-            reason_uri,
+            reason,
+            details_uri,
         }
         .publish(&env);
+
+        if rejection_reason == RejectionReason::FraudDetected {
+            Self::cancel_campaign_state(&env, &mut campaign, true);
+        }
 
         Ok(())
     }
@@ -2113,13 +2181,7 @@ impl Aidline {
             return Err(Error::CampaignNotActive);
         }
 
-        campaign.status = CampaignStatus::Cancelled;
-        Self::settle_streams(&env, &mut campaign);
-        storage::save_campaign(&env, &campaign);
-        Self::close_verifier_assignments(&env, &campaign.verifiers);
-        Self::bump_all_verifiers(&env, &campaign.verifiers, |s| s.campaigns_cancelled += 1);
-
-        CampaignCancelled { campaign_id }.publish(&env);
+        Self::cancel_campaign_state(&env, &mut campaign, true);
         Ok(())
     }
 
@@ -2151,11 +2213,7 @@ impl Aidline {
             return Err(Error::CampaignNotActive);
         }
 
-        campaign.status = CampaignStatus::Cancelled;
-        Self::settle_streams(&env, &mut campaign);
-        storage::save_campaign(&env, &campaign);
-        Self::close_verifier_assignments(&env, &campaign.verifiers);
-        Self::bump_all_verifiers(&env, &campaign.verifiers, |s| s.campaigns_cancelled += 1);
+        Self::cancel_campaign_state(&env, &mut campaign, false);
 
         CampaignCancelledWithReason {
             campaign_id,
@@ -2214,12 +2272,7 @@ impl Aidline {
         }
 
         if !ended && is_overdue {
-            campaign.status = CampaignStatus::Cancelled;
-            Self::settle_streams(env, &mut campaign);
-            storage::save_campaign(env, &campaign);
-            Self::close_verifier_assignments(env, &campaign.verifiers);
-            Self::bump_all_verifiers(env, &campaign.verifiers, |s| s.campaigns_cancelled += 1);
-            CampaignCancelled { campaign_id }.publish(env);
+            Self::cancel_campaign_state(env, &mut campaign, true);
         }
 
         // A campaign that expired was never cancelled explicitly, so its streams
@@ -2580,6 +2633,22 @@ impl Aidline {
     }
 
     // ─── Internal ─────────────────────────────────────────────────────────────
+
+    /// Transitions an active campaign to `Cancelled`, settles running streams,
+    /// releases verifier active-campaign locks, and updates verifier cancellation stats.
+    fn cancel_campaign_state(env: &Env, campaign: &mut Campaign, emit_cancelled: bool) {
+        campaign.status = CampaignStatus::Cancelled;
+        Self::settle_streams(env, campaign);
+        storage::save_campaign(env, campaign);
+        Self::close_verifier_assignments(env, &campaign.verifiers);
+        Self::bump_all_verifiers(env, &campaign.verifiers, |s| s.campaigns_cancelled += 1);
+        if emit_cancelled {
+            CampaignCancelled {
+                campaign_id: campaign.id,
+            }
+            .publish(env);
+        }
+    }
 
     fn ensure_open(env: &Env, campaign: &Campaign) -> Result<(), Error> {
         if campaign.status != CampaignStatus::Active {

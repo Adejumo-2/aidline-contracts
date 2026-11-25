@@ -101,4 +101,10 @@ pub enum Error {
 
     // Proof URI validation
     InvalidProofUri = 57,
+
+    // Milestone rejection reason validation
+    InvalidRejectionReason = 58,
+
+    // Metadata URI validation
+    InvalidMetadataUri = 59,
 }

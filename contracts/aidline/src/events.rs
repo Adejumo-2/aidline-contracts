@@ -582,14 +582,15 @@ impl MilestoneApproved {
 pub struct MilestoneRejected {
     pub campaign_id: u64,
     pub index: u32,
-    pub reason_uri: String,
+    pub reason: u32,
+    pub details_uri: String,
 }
 
 impl MilestoneRejected {
     pub fn publish(&self, env: &Env) {
         env.events().publish(
             (symbol_short!("rejected"), self.campaign_id, self.index),
-            self.reason_uri.clone(),
+            (self.reason, self.details_uri.clone()),
         );
     }
 }

@@ -179,7 +179,7 @@ Sponsors are also included in the refund pool (their `Contribution` entry tracks
 | `pledge_settlement` | `campaign_id` | `milestone_index`, `total_pledged_pulled` |
 | `verifier_reassigned` | `campaign_id` | `old_verifier`, `new_verifier` |
 | `approved` | `campaign_id`, `milestone_index` | `verifier`, `approvals_count`, `threshold` |
-| `rejected` | `campaign_id`, `milestone_index` | `reason_uri` |
+| `rejected` | `campaign_id`, `milestone_index` | `reason`, `details_uri` |
 | `paused` | `admin` | none |
 | `unpaused` | `admin` | none |
 | `upgraded` | none | `new_wasm_hash` |
