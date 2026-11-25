@@ -50,7 +50,7 @@ If `make test` passes, you are ready.
 
 1. Fork the repo and create a branch: `git checkout -b feat/short-description`
 2. Make your change. Keep pull requests focused on one issue.
-3. Add or update tests in `contracts/aidline/src/test.rs`. Contract changes without tests will not be merged.
+3. Add or update tests in `contracts/aidline/src/test/` (one module per area). Contract changes without tests will not be merged.
 4. Run the same checks CI runs:
    ```sh
    make fmt

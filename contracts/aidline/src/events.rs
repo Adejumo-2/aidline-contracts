@@ -517,6 +517,71 @@ impl StreamClaimed {
     }
 }
 
+// ─── Issue #115: challenge window ────────────────────────────────────────────
+
+/// Emitted when a milestone approval is proposed and starts its challenge window.
+pub struct MilestoneProposed {
+    pub campaign_id: u64,
+    pub index: u32,
+    pub ready_at: u64,
+}
+
+impl MilestoneProposed {
+    pub fn publish(&self, env: &Env) {
+        env.events().publish(
+            (symbol_short!("proposed"), self.campaign_id, self.index),
+            self.ready_at,
+        );
+    }
+}
+
+/// Emitted when a proposed approval is blocked and returns to pending.
+pub struct MilestoneBlocked {
+    pub campaign_id: u64,
+    pub index: u32,
+    /// The admin, or the donor whose vote reached the quorum.
+    pub by: Address,
+}
+
+impl MilestoneBlocked {
+    pub fn publish(&self, env: &Env) {
+        env.events().publish(
+            (symbol_short!("blocked"), self.campaign_id, self.index),
+            self.by.clone(),
+        );
+    }
+}
+
+/// Emitted when a proposed approval survives its window and is finalized.
+pub struct MilestoneFinalized {
+    pub campaign_id: u64,
+    pub index: u32,
+}
+
+impl MilestoneFinalized {
+    pub fn publish(&self, env: &Env) {
+        env.events().publish(
+            (symbol_short!("finalized"), self.campaign_id, self.index),
+            (),
+        );
+    }
+}
+
+// ─── Issue #111: slasher role ────────────────────────────────────────────────
+
+/// Emitted when the admin changes who may slash verifier bonds.
+pub struct SlasherChanged {
+    pub old: Address,
+    pub new: Address,
+}
+
+impl SlasherChanged {
+    pub fn publish(&self, env: &Env) {
+        env.events()
+            .publish((symbol_short!("slasher"),), (self.old.clone(), self.new.clone()));
+    }
+}
+
 // ─── Issue #118: storage schema migration ────────────────────────────────────
 
 /// Emitted by every `migrate` call. `from == to` when nothing was pending.
@@ -582,14 +647,15 @@ impl MilestoneApproved {
 pub struct MilestoneRejected {
     pub campaign_id: u64,
     pub index: u32,
-    pub reason_uri: String,
+    pub reason: u32,
+    pub details_uri: String,
 }
 
 impl MilestoneRejected {
     pub fn publish(&self, env: &Env) {
         env.events().publish(
             (symbol_short!("rejected"), self.campaign_id, self.index),
-            self.reason_uri.clone(),
+            (self.reason, self.details_uri.clone()),
         );
     }
 }
@@ -702,5 +768,41 @@ impl TreasuryUpdated {
     pub fn publish(&self, env: &Env) {
         env.events()
             .publish((symbol_short!("tres_upd"),), self.treasury.clone());
+    }
+}
+
+// ─── Timelock events (issue #113) ────────────────────────────────────────────
+
+pub struct ActionQueued {
+    pub action_id: u64,
+    pub eta: u64,
+}
+
+impl ActionQueued {
+    pub fn publish(&self, env: &Env) {
+        env.events()
+            .publish((symbol_short!("tl_queue"), self.action_id), self.eta);
+    }
+}
+
+pub struct ActionCancelled {
+    pub action_id: u64,
+}
+
+impl ActionCancelled {
+    pub fn publish(&self, env: &Env) {
+        env.events()
+            .publish((symbol_short!("tl_cancel"), self.action_id), ());
+    }
+}
+
+pub struct ActionExecuted {
+    pub action_id: u64,
+}
+
+impl ActionExecuted {
+    pub fn publish(&self, env: &Env) {
+        env.events()
+            .publish((symbol_short!("tl_exec"), self.action_id), ());
     }
 }
