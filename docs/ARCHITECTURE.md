@@ -49,7 +49,7 @@ Expiry is computed from the ledger timestamp rather than stored, so no one needs
 For `Emergency` campaigns, the assigned verifier can release an emergency fast-track advance immediately, before milestone one is completed. 
 This provides critical funds in the first hours of a disaster without waiting for a full milestone to be funded or proven.
 
-- **Cap:** The advance is hard-capped at 20% of the campaign's total goal.
+- **Cap:** The advance is hard-capped at `min(20% of the campaign's total goal, milestone 0 allocation)`.
 - **Escrow requirements:** The advance cannot exceed the currently available unreleased escrow.
 - **Accounting:** The advance is recorded against milestone one (`milestones[0]`). When the verifier later formally approves milestone one, the contract only transfers the remaining balance (if any) of that milestone to the beneficiary. The total funds released for milestone one never exceed its scheduled amount.
 - **Security:** Only the registered verifier can trigger the fast track. It is only available for `Emergency` campaigns, and only once per campaign.
@@ -182,7 +182,7 @@ Sponsors are also included in the refund pool (their `Contribution` entry tracks
 | `pledge_settlement` | `campaign_id` | `milestone_index`, `total_pledged_pulled` |
 | `verifier_reassigned` | `campaign_id` | `old_verifier`, `new_verifier` |
 | `approved` | `campaign_id`, `milestone_index` | `verifier`, `approvals_count`, `threshold` |
-| `rejected` | `campaign_id`, `milestone_index` | `reason_uri` |
+| `rejected` | `campaign_id`, `milestone_index` | `reason`, `details_uri` |
 | `paused` | `admin` | none |
 | `unpaused` | `admin` | none |
 | `upgraded` | none | `new_wasm_hash` |
@@ -310,13 +310,32 @@ The admin sets a required bond amount (`set_bond_requirement`) and withdrawal de
 
 After deregistration the verifier must wait at least `bond_withdraw_delay` seconds before calling `withdraw_bond`. This delay gives the admin time to slash if a fraud dispute is raised.
 
+### Bond withdrawal while campaigns are open (#129)
+
+A verifier cannot take their bond back while they are still responsible for a campaign. The contract keeps a count per verifier of campaigns that are assigned to them and not yet completed or cancelled: it goes up when a campaign is created with them or reassigned to them, and down when the campaign completes, is cancelled, or is reassigned away. `withdraw_bond` fails with `VerifierHasActiveCampaigns` while the count is above zero, so the bond stays slashable for the whole life of the campaigns. A campaign past its deadline stays active until it is cancelled (the creator or admin can cancel it), which then releases the verifier. Campaigns created before this change are not counted.
+
+### Donor vote to cancel a stalled campaign (#114)
+
+Donors have a say when a verifier goes silent.
+
+- **Weight:** a donor's vote counts for their contribution at the time they vote, once per donor, and only while the campaign is `Active`.
+- **Stall period:** `STALL_PERIOD`, 14 days with no progress, measured from the later of the campaign's start and its last approved milestone. Any approval resets it.
+- **Threshold:** the total vote weight must reach `CANCEL_VOTE_BPS` (50%) of `raised`.
+- **Trigger:** `vote_cancel` cancels the campaign if both conditions hold when the vote is cast. A vote cast before the stall period ended is recorded, and anyone can call `execute_vote_cancel` once the period has passed. The campaign then becomes `Cancelled` and refunds open.
+- **Withdrawing:** `withdraw_cancel_vote` removes the donor's vote while the campaign is still `Active`.
+- **Events:** `cvote`, `cvote_wd` and the usual `canceled`.
+
+### Streaming release (#117)
+
+`create_campaign_with_streams` takes a `stream_days` entry per milestone. `0` is a normal lump sum. A positive value makes that milestone's payout, after the platform fee, vest linearly over that many days from the moment it is approved. Nothing is transferred at approval; the beneficiary calls `claim_streamed` to withdraw what has vested so far, as often as they like, and `vested = total * elapsed / duration`, capped at `total`. The funds stay in escrow until claimed, and the milestone still counts as released. See [ADR 0007](adr/0007-streaming-release.md) for what happens on cancel.
+
 ### How disputes and slashing work
 
 `slash_verifier(admin, verifier, campaign_id, slash_amount)`:
 1. Requires auth from the admin.
 2. Checks that `slash_amount <= bond.remaining`.
 3. Reduces `bond.remaining` by `slash_amount`.
-4. Distributes the slashed tokens back to the affected campaign's donors by adding `slash_amount` to `campaign.raised` and crediting the contract as the "donor", so the existing pro-rata refund formula automatically distributes the recovered funds to all contributors when they call `refund`.
+4. Credits `slash_amount` to the campaign's `SlashedRecovery` pool (`campaign.raised` is left untouched). `refund` pays each donor `contributed * (raised - released + slashed_recovery) / raised`, so slashed funds are distributed pro-rata to contributors and nothing is credited to the contract address.
 5. Emits `BondSlashed`.
 
 Preventing double-slash for the same dispute is enforced by tracking slashed amounts; the admin cannot slash more than `bond.remaining`.

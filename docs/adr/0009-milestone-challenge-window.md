@@ -1,4 +1,4 @@
-# 0007: Challenge window before a milestone is paid
+# 0009: Challenge window before a milestone is paid
 
 Status: Accepted
 
