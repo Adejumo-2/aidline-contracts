@@ -184,7 +184,7 @@ Sponsors are also included in the refund pool (their `Contribution` entry tracks
 | `pledge_settlement` | `campaign_id` | `milestone_index`, `total_pledged_pulled` |
 | `verifier_reassigned` | `campaign_id` | `old_verifier`, `new_verifier` |
 | `approved` | `campaign_id`, `milestone_index` | `verifier`, `approvals_count`, `threshold` |
-| `rejected` | `campaign_id`, `milestone_index` | `reason_uri` |
+| `rejected` | `campaign_id`, `milestone_index` | `reason`, `details_uri` |
 | `paused` | `admin` | none |
 | `unpaused` | `admin` | none |
 | `upgraded` | none | `new_wasm_hash` |
@@ -475,7 +475,7 @@ To help contributors understand the impact of contract changes, the following ta
 
 ### How to regenerate the table
 
-Maintainers can regenerate these measurements using the built-in test environment. The test `test_measure_resource_costs` in `contracts/aidline/src/test.rs` executes each entry point and resets the budget.
+Maintainers can regenerate these measurements using the built-in test environment. The test `test_measure_resource_costs` in `contracts/aidline/src/test/costs_and_events.rs` executes each entry point and resets the budget.
 
 1. Ensure you have the Soroban CLI and test tools installed.
 2. Run the test and capture the output:

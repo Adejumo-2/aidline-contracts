@@ -2,7 +2,8 @@ use soroban_sdk::{Address, Env, String, Vec};
 
 use crate::errors::Error;
 use crate::types::{
-    Beneficiary, Campaign, DataKey, Pledge, SponsorPool, Stream, VerifierBond, VerifierStats,
+    Beneficiary, Campaign, DataKey, Pledge, QueuedAction, SponsorPool, Stream, VerifierBond,
+    VerifierStats,
 };
 
 const DAY_IN_LEDGERS: u32 = 17_280;
@@ -110,8 +111,8 @@ pub fn is_verifier(env: &Env, who: &Address) -> bool {
     let key = DataKey::Verifier(who.clone());
     let registered: Option<bool> = env.storage().persistent().get(&key);
     // Reads keep the registration alive, so a verifier that is still in use is
-    // never silently dropped when its entry would otherwise expire (#110).
-    if registered.is_some() {
+    // never silently dropped when its entry would otherwise expire (#110, #181).
+    if registered == Some(true) {
         bump(env, &key);
     }
     registered.unwrap_or(false)
@@ -248,7 +249,7 @@ pub fn set_beneficiaries(env: &Env, campaign_id: u64, list: &Vec<Beneficiary>) {
 pub fn contribution(env: &Env, id: u64, donor: &Address) -> i128 {
     let key = DataKey::Contribution(id, donor.clone());
     let amount: Option<i128> = env.storage().persistent().get(&key);
-    if amount.is_some() {
+    if amount.is_some_and(|a| a > 0) {
         bump(env, &key);
     }
     amount.unwrap_or(0)
@@ -262,6 +263,48 @@ pub fn set_contribution(env: &Env, id: u64, donor: &Address, amount: i128) {
         env.storage().persistent().set(&key, &amount);
         bump(env, &key);
     }
+}
+
+pub fn stretch_count(env: &Env, id: u64) -> u32 {
+    let key = DataKey::StretchCount(id);
+    env.storage().persistent().get(&key).unwrap_or(0)
+}
+
+pub fn set_stretch_count(env: &Env, id: u64, count: u32) {
+    let key = DataKey::StretchCount(id);
+    env.storage().persistent().set(&key, &count);
+    bump(env, &key);
+}
+
+pub fn next_action_id(env: &Env) -> u64 {
+    let id: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::NextActionId)
+        .unwrap_or(0);
+    env.storage()
+        .instance()
+        .set(&DataKey::NextActionId, &(id + 1));
+    id
+}
+
+pub fn queued_action(env: &Env, id: u64) -> Option<QueuedAction> {
+    let key = DataKey::QueuedAction(id);
+    let queued = env.storage().persistent().get(&key)?;
+    bump(env, &key);
+    Some(queued)
+}
+
+pub fn save_queued_action(env: &Env, id: u64, queued: &QueuedAction) {
+    let key = DataKey::QueuedAction(id);
+    env.storage().persistent().set(&key, queued);
+    bump(env, &key);
+}
+
+pub fn remove_queued_action(env: &Env, id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::QueuedAction(id));
 }
 
 pub fn slashed_recovery(env: &Env, id: u64) -> i128 {

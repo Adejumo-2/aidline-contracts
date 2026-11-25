@@ -13,7 +13,7 @@ The backend indexer and off-chain analytics listen to these events to reconstruc
 | `CampaignCreated` | `created` | `(symbol, campaign_id)` | `(creator, kind, goal, deadline, min_donation)` | `create_campaign`, `create_campaign_with_due_dates`, `create_multisig_campaign`, `create_campaign_min_donation` |
 | `Donated` | `donated` | `(symbol, campaign_id, donor)` | `amount` | `donate` |
 | `MilestoneReleased` | `released` | `(symbol, campaign_id, index)` | `(amount, fee, proof_uri)` | `approve_milestone`, `approve_milestone_multisig` |
-| `MilestoneRejected` | `rejected` | `(symbol, campaign_id, index)` | `reason_uri` | `reject_milestone` |
+| `MilestoneRejected` | `rejected` | `(symbol, campaign_id, index)` | `(reason, details_uri)` | `reject_milestone` |
 | `CampaignCancelled` | `canceled` | `(symbol, campaign_id)` | `()` (empty) | `cancel_campaign` |
 | `Refunded` | `refunded` | `(symbol, campaign_id, donor)` | `amount` | `refund` |
 | `VerifierUpdated` | `verifier` | `(symbol, verifier)` | `active` | `add_verifier`, `remove_verifier` |
@@ -38,8 +38,8 @@ The backend indexer and off-chain analytics listen to these events to reconstruc
 | `ContractPaused` | `paused` | `(symbol, admin)` | `()` (empty) | `pause` |
 | `ContractUnpaused` | `unpaused` | `(symbol, admin)` | `()` (empty) | `unpause` |
 | `ContractUpgraded` | `upgraded` | `(symbol,)` | `new_wasm_hash` | `upgrade` |
-| `MetadataUpdated` | `meta_upd` | `(symbol, campaign_id)` | `new_metadata_uri` | `update_campaign_metadata` |
-| `DeadlineExtended` | `dl_ext` | `(symbol, campaign_id)` | `(old_deadline, new_deadline)` | `extend_deadline` |
+| `MetadataUpdated` | `meta_upd` | `(symbol, campaign_id)` | `new_metadata_uri` | `update_metadata` |
+| `DeadlineExtended` | `dl_ext` | `(symbol, campaign_id)` | `(old_deadline, new_deadline)` | `extend_deadline`, `extend_deadline_by` |
 
 ---
 
@@ -81,13 +81,14 @@ Emitted when a milestone reaches its required verification threshold and funds a
 - **Emitted by**: `approve_milestone`, `approve_milestone_multisig`
 
 ### 4. `MilestoneRejected`
-Emitted when a verifier rejects a pending milestone, providing a reason URI for off-chain auditing.
+Emitted when a verifier rejects a pending milestone, providing a structured reason code and details URI for off-chain auditing.
 - **Fields in code**:
   1. `campaign_id: u64`
   2. `index: u32`
-  3. `reason_uri: String`
+  3. `reason: u32`
+  4. `details_uri: String`
 - **Topics**: `(symbol_short!("rejected"), campaign_id: u64, index: u32)`
-- **Data**: `reason_uri: String`
+- **Data**: `(reason: u32, details_uri: String)`
 - **Emitted by**: `reject_milestone`
 
 ### 5. `CampaignCancelled`
@@ -329,7 +330,7 @@ Emitted when the campaign creator updates the metadata URI before donations begi
   2. `new_metadata_uri: String`
 - **Topics**: `(symbol_short!("meta_upd"), campaign_id: u64)`
 - **Data**: `new_metadata_uri: String`
-- **Emitted by**: `update_campaign_metadata`
+- **Emitted by**: `update_metadata`
 
 ### 30. `DeadlineExtended`
 Emitted when the campaign creator grants a one-time deadline extension.
@@ -339,9 +340,29 @@ Emitted when the campaign creator grants a one-time deadline extension.
   3. `new_deadline: u64`
 - **Topics**: `(symbol_short!("dl_ext"), campaign_id: u64)`
 - **Data**: `(old_deadline: u64, new_deadline: u64)`
-- **Emitted by**: `extend_deadline`
+- **Emitted by**: `extend_deadline`, `extend_deadline_by`
 
-### 31. `BeneficiaryPaid`
+### 31. `ActionQueued`
+Emitted when the admin queues a timelocked action.
+- **Fields in code**: `action_id: u64`, `eta: u64`
+- **Topics**: `(symbol_short!("tl_queue"), action_id: u64)`
+- **Data**: `eta: u64`
+- **Emitted by**: `queue_action`
+
+### 32. `ActionCancelled`
+Emitted when the admin cancels a queued action.
+- **Fields in code**: `action_id: u64`
+- **Topics**: `(symbol_short!("tl_cancel"), action_id: u64)`
+- **Data**: `()`
+- **Emitted by**: `cancel_action`
+
+### 33. `ActionExecuted`
+Emitted when a queued action is executed after its delay.
+- **Fields in code**: `action_id: u64`
+- **Topics**: `(symbol_short!("tl_exec"), action_id: u64)`
+- **Data**: `()`
+- **Emitted by**: `execute_action`
+### 34. `BeneficiaryPaid`
 Emitted once per recipient when a split-payout campaign pays out a milestone or the emergency advance (#116).
 - **Fields in code**:
   1. `campaign_id: u64`

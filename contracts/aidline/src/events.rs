@@ -582,14 +582,15 @@ impl MilestoneApproved {
 pub struct MilestoneRejected {
     pub campaign_id: u64,
     pub index: u32,
-    pub reason_uri: String,
+    pub reason: u32,
+    pub details_uri: String,
 }
 
 impl MilestoneRejected {
     pub fn publish(&self, env: &Env) {
         env.events().publish(
             (symbol_short!("rejected"), self.campaign_id, self.index),
-            self.reason_uri.clone(),
+            (self.reason, self.details_uri.clone()),
         );
     }
 }
@@ -702,5 +703,41 @@ impl TreasuryUpdated {
     pub fn publish(&self, env: &Env) {
         env.events()
             .publish((symbol_short!("tres_upd"),), self.treasury.clone());
+    }
+}
+
+// ─── Timelock events (issue #113) ────────────────────────────────────────────
+
+pub struct ActionQueued {
+    pub action_id: u64,
+    pub eta: u64,
+}
+
+impl ActionQueued {
+    pub fn publish(&self, env: &Env) {
+        env.events()
+            .publish((symbol_short!("tl_queue"), self.action_id), self.eta);
+    }
+}
+
+pub struct ActionCancelled {
+    pub action_id: u64,
+}
+
+impl ActionCancelled {
+    pub fn publish(&self, env: &Env) {
+        env.events()
+            .publish((symbol_short!("tl_cancel"), self.action_id), ());
+    }
+}
+
+pub struct ActionExecuted {
+    pub action_id: u64,
+}
+
+impl ActionExecuted {
+    pub fn publish(&self, env: &Env) {
+        env.events()
+            .publish((symbol_short!("tl_exec"), self.action_id), ());
     }
 }

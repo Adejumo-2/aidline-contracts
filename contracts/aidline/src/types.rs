@@ -23,6 +23,34 @@ pub enum CampaignStatus {
     Expired,
 }
 
+/// Structured reason codes for a verifier rejecting a pending milestone (Issue #161).
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum RejectionReason {
+    /// Submitted deliverables are incomplete or do not meet milestone scope.
+    IncompleteWork = 1,
+    /// Fraudulent activity or falsified evidence detected; triggers campaign cancellation.
+    FraudDetected = 2,
+    /// Provided proof is insufficient to verify milestone completion.
+    InsufficientProof = 3,
+    /// Reported expenditures exceed the milestone budget or allocation.
+    BudgetExceeded = 4,
+}
+
+impl RejectionReason {
+    /// Converts a numeric reason code into a [`RejectionReason`] variant.
+    pub fn from_code(code: u32) -> Option<Self> {
+        match code {
+            1 => Some(Self::IncompleteWork),
+            2 => Some(Self::FraudDetected),
+            3 => Some(Self::InsufficientProof),
+            4 => Some(Self::BudgetExceeded),
+            _ => None,
+        }
+    }
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Campaign {
@@ -96,6 +124,29 @@ pub struct SponsorPool {
     pub remaining: i128,
     /// Total tokens already matched and added to the campaign's raised amount.
     pub matched: i128,
+}
+
+/// A sensitive admin action that must wait out the timelock before it runs (Issue #113).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TimelockedAction {
+    /// `reassign_verifier(campaign_id, new_verifier)`
+    ReassignVerifier(u64, Address),
+    /// `slash_verifier(verifier, campaign_id, slash_amount)`
+    SlashVerifier(Address, u64, i128),
+    /// `set_bond_requirement(amount)`
+    SetBondRequirement(i128),
+    /// `set_bond_withdraw_delay(delay)`
+    SetBondWithdrawDelay(u64),
+}
+
+/// An action waiting in the timelock queue.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueuedAction {
+    pub action: TimelockedAction,
+    /// Earliest ledger timestamp (seconds) at which anyone may execute the action.
+    pub eta: u64,
 }
 
 /// A milestone payout that vests linearly after approval (Issue #117).
@@ -218,6 +269,11 @@ pub enum DataKey {
     VerifierProfile(Address),
     // Paginated donors list
     CampaignDonors(u64),
+    // Issue #113: timelock queue
+    NextActionId,
+    QueuedAction(u64),
+    // Issue #120: number of stretch milestones at the end of a campaign's milestone list
+    StretchCount(u64),
     // Slashed verifier bonds awaiting pro-rata refund to donors
     SlashedRecovery(u64),
     // Issue #125: ids of the pledges made to one campaign

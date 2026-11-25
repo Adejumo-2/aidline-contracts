@@ -21,19 +21,20 @@ use soroban_sdk::{
 
 pub use errors::Error;
 pub use types::{
-    Beneficiary, BondStatus, Campaign, CampaignKind, CampaignStatus, Pledge, SponsorPool, Stream,
-    VerifierBond, VerifierStats,
+    Beneficiary, BondStatus, Campaign, CampaignKind, CampaignStatus, Pledge, QueuedAction,
+    RejectionReason, SponsorPool, Stream, TimelockedAction, VerifierBond, VerifierStats,
 };
 
 use events::{
-    AdminAccepted, AdminChanged, AdminProposed, BeneficiaryPaid, BondSlashed, BondWithdrawn,
-    CampaignCancelled, CampaignCancelledWithReason, CampaignCreated, CancelVoteWithdrawn,
-    CancelVoted, ContractPaused, ContractUnpaused, ContractUpgraded, DeadlineExtended, Donated,
-    EmergencyAdvanceReleased, MatchingApplied, MetadataUpdated, Migrated, MilestoneApproved,
-    MilestoneRejected, MilestoneReleased, PlatformFeeUpdated, PledgeCancelled, PledgeCreated,
-    PledgePulled, PledgeSettlement, PledgeSkipped, Refunded, SponsorPoolDeposited,
-    SponsorPoolReturned, StreamClaimed, TokenAllowlistUpdated, TreasuryUpdated, VerifierBondPosted,
-    VerifierDeregistered, VerifierProfileUpdated, VerifierReassigned, VerifierUpdated,
+    ActionCancelled, ActionExecuted, ActionQueued, AdminAccepted, AdminChanged, AdminProposed,
+    BeneficiaryPaid, BondSlashed, BondWithdrawn, CampaignCancelled, CampaignCancelledWithReason,
+    CampaignCreated, CancelVoteWithdrawn, CancelVoted, ContractPaused, ContractUnpaused,
+    ContractUpgraded, DeadlineExtended, Donated, EmergencyAdvanceReleased, MatchingApplied,
+    MetadataUpdated, Migrated, MilestoneApproved, MilestoneRejected, MilestoneReleased,
+    PlatformFeeUpdated, PledgeCancelled, PledgeCreated, PledgePulled, PledgeSettlement,
+    PledgeSkipped, Refunded, SponsorPoolDeposited, SponsorPoolReturned, StreamClaimed,
+    TokenAllowlistUpdated, TreasuryUpdated, VerifierBondPosted, VerifierDeregistered,
+    VerifierProfileUpdated, VerifierReassigned, VerifierUpdated,
 };
 
 const MAX_MILESTONES: u32 = 20;
@@ -58,6 +59,11 @@ const MAX_DEADLINE_EXTENSION: u64 = 30 * 86_400;
 /// Maximum number of times a campaign's verifier may be reassigned.
 pub const MAX_VERIFIER_REASSIGNMENTS: u32 = 2;
 
+/// Seconds a queued admin action must wait before anyone may execute it.
+pub const TIMELOCK_DELAY: u64 = 2 * 86_400;
+
+/// Seconds after the delay during which a queued action can still be executed.
+pub const TIMELOCK_GRACE_PERIOD: u64 = 7 * 86_400;
 /// Seconds a campaign must go without progress (campaign start or the last
 /// approved milestone, whichever is later) before donors can cancel it by vote.
 pub const STALL_PERIOD: u64 = 14 * 86_400;
@@ -117,16 +123,21 @@ impl Aidline {
     ///
     /// # Errors
     /// - [`Error::Unauthorized`]: caller is not the admin (enforced via
-    ///   `require_auth` on the stored admin address).
-    pub fn add_verifier(env: Env, verifier: Address) {
+    ///   `require_auth` on the stored admin address) or `verifier` is the
+    ///   contract address itself.
+    pub fn add_verifier(env: Env, verifier: Address) -> Result<(), Error> {
         storage::admin(&env).require_auth();
         storage::bump_instance(&env);
+        if verifier == env.current_contract_address() {
+            return Err(Error::Unauthorized);
+        }
         storage::set_verifier(&env, &verifier, true);
         VerifierUpdated {
             verifier,
             active: true,
         }
         .publish(&env);
+        Ok(())
     }
 
     /// Deactivates `verifier`, preventing them from approving future milestones.
@@ -479,11 +490,15 @@ impl Aidline {
     /// # Errors
     /// - [`Error::BondRequired`]: `bond_amount` is below the required minimum
     ///   or is zero.
-    /// - [`Error::Unauthorized`]: `verifier` is already registered.
+    /// - [`Error::Unauthorized`]: `verifier` is already registered or is the
+    ///   contract address itself.
     pub fn register_with_bond(env: Env, verifier: Address, bond_amount: i128) -> Result<(), Error> {
         Self::ensure_current_schema(&env)?;
         verifier.require_auth();
         storage::bump_instance(&env);
+        if verifier == env.current_contract_address() {
+            return Err(Error::Unauthorized);
+        }
 
         let required = storage::bond_requirement(&env);
         if bond_amount < required || bond_amount <= 0 {
@@ -653,7 +668,15 @@ impl Aidline {
         slash_amount: i128,
     ) -> Result<(), Error> {
         storage::admin(&env).require_auth();
+        Self::slash_verifier_impl(env, verifier, campaign_id, slash_amount)
+    }
 
+    fn slash_verifier_impl(
+        env: Env,
+        verifier: Address,
+        campaign_id: u64,
+        slash_amount: i128,
+    ) -> Result<(), Error> {
         if slash_amount <= 0 {
             return Err(Error::InvalidAmount);
         }
@@ -736,6 +759,7 @@ impl Aidline {
     /// Emits [`CampaignCreated`].
     ///
     /// # Errors
+    /// - [`Error::Unauthorized`]: `beneficiary` is the contract address itself.
     /// - [`Error::UriTooLong`]: `metadata_uri` exceeds [`MAX_URI_LENGTH`] bytes.
     /// - [`Error::ConflictOfInterest`]: `verifier` is equal to `creator` or
     ///   `beneficiary`.
@@ -911,6 +935,10 @@ impl Aidline {
         creator.require_auth();
         storage::bump_instance(&env);
 
+        let contract = env.current_contract_address();
+        if beneficiary == contract {
+            return Err(Error::Unauthorized);
+        }
         if min_donation < 0 {
             return Err(Error::InvalidAmount);
         }
@@ -938,7 +966,7 @@ impl Aidline {
             if seen.contains(&v) {
                 return Err(Error::DuplicateVerifier);
             }
-            if !storage::is_verifier(&env, &v) {
+            if v == contract || !storage::is_verifier(&env, &v) {
                 return Err(Error::NotVerifier);
             }
             seen.push_back(v);
@@ -1085,8 +1113,12 @@ impl Aidline {
         if beneficiaries.is_empty() || beneficiaries.len() > MAX_BENEFICIARIES {
             return Err(Error::InvalidBeneficiaries);
         }
+        let contract = env.current_contract_address();
         let mut total_bps: u32 = 0;
         for (i, b) in beneficiaries.iter().enumerate() {
+            if b.to == contract {
+                return Err(Error::Unauthorized);
+            }
             if b.bps == 0 {
                 return Err(Error::InvalidBeneficiaries);
             }
@@ -1143,12 +1175,65 @@ impl Aidline {
         )
     }
 
+    /// Creates a campaign with optional stretch milestones and returns its ID.
+    ///
+    /// The stretch milestones are appended after the base `milestones` and the
+    /// campaign's `goal` is the sum of both, so donations are accepted past the
+    /// base goal only up to the stretch total. Stretch milestones are approved
+    /// in order like any other milestone. Campaigns that do not reach the
+    /// stretch refund pro rata as usual. With an empty `stretch_milestones`
+    /// this behaves exactly like [`create_campaign`].
+    ///
+    /// # Errors
+    /// Same as [`create_campaign`]. The combined milestone list must not exceed
+    /// [`MAX_MILESTONES`].
+    pub fn create_campaign_with_stretch(
+        env: Env,
+        creator: Address,
+        beneficiary: Address,
+        verifier: Address,
+        token: Address,
+        kind: CampaignKind,
+        metadata_uri: String,
+        deadline: u64,
+        milestones: Vec<i128>,
+        stretch_milestones: Vec<i128>,
+    ) -> Result<u64, Error> {
+        let mut all_milestones = milestones;
+        for amount in stretch_milestones.iter() {
+            all_milestones.push_back(amount);
+        }
+
+        let id = Self::create_campaign(
+            env.clone(),
+            creator,
+            beneficiary,
+            verifier,
+            token,
+            kind,
+            metadata_uri,
+            deadline,
+            all_milestones,
+        )?;
+        if !stretch_milestones.is_empty() {
+            storage::set_stretch_count(&env, id, stretch_milestones.len());
+        }
+        Ok(id)
+    }
+
+    /// Returns how many of `campaign_id`'s trailing milestones are stretch milestones.
+    pub fn stretch_milestone_count(env: Env, campaign_id: u64) -> u32 {
+        storage::stretch_count(&env, campaign_id)
+    }
+
     /// Updates the off-chain metadata URI for `campaign_id`.
     ///
     /// Only the campaign's creator may call this, and only before any
     /// donations have been received (`raised == 0`). Emits [`MetadataUpdated`].
     ///
     /// # Errors
+    /// - [`Error::MigrationPending`]: contract storage migration is pending.
+    /// - [`Error::InvalidMetadataUri`]: `new_metadata_uri` is empty.
     /// - [`Error::UriTooLong`]: `new_metadata_uri` exceeds [`MAX_URI_LENGTH`] bytes.
     /// - [`Error::CampaignNotFound`]: no campaign with `campaign_id` exists.
     /// - [`Error::CampaignNotActive`]: campaign is not currently active.
@@ -1159,10 +1244,14 @@ impl Aidline {
         campaign_id: u64,
         new_metadata_uri: String,
     ) -> Result<(), Error> {
+        Self::ensure_current_schema(&env)?;
         let mut campaign = storage::campaign(&env, campaign_id)?;
         campaign.creator.require_auth();
         Self::ensure_open(&env, &campaign)?;
 
+        if new_metadata_uri.is_empty() {
+            return Err(Error::InvalidMetadataUri);
+        }
         if new_metadata_uri.len() > MAX_URI_LENGTH {
             return Err(Error::UriTooLong);
         }
@@ -1183,7 +1272,7 @@ impl Aidline {
         Ok(())
     }
 
-    /// Extends an active campaign's deadline by up to 30 days.
+    /// Extends an active campaign's deadline to `new_deadline` (at most 30 days).
     ///
     /// Only the campaign's creator may call this. An extension can be
     /// granted at most once per campaign, and only while the campaign is
@@ -1191,6 +1280,7 @@ impl Aidline {
     /// [`DeadlineExtended`].
     ///
     /// # Errors
+    /// - [`Error::MigrationPending`]: contract storage migration is pending.
     /// - [`Error::CampaignNotFound`]: no campaign with `campaign_id` exists.
     /// - [`Error::CampaignNotActive`]: campaign is not in `Active` status.
     /// - [`Error::CampaignExpired`]: current deadline has already elapsed.
@@ -1199,32 +1289,73 @@ impl Aidline {
     /// - [`Error::InvalidDeadlineExtension`]: `new_deadline` is not after the
     ///   current deadline or extends it by more than 30 days.
     pub fn extend_deadline(env: Env, campaign_id: u64, new_deadline: u64) -> Result<(), Error> {
-        let mut campaign = storage::campaign(&env, campaign_id)?;
+        Self::internal_extend_deadline(&env, campaign_id, |current| {
+            let max_deadline = current.saturating_add(MAX_DEADLINE_EXTENSION);
+            if new_deadline <= current || new_deadline > max_deadline {
+                return Err(Error::InvalidDeadlineExtension);
+            }
+            Ok(new_deadline)
+        })
+    }
+
+    /// Extends an active campaign's deadline by `additional_seconds` (1 to 30 days).
+    ///
+    /// Only the campaign's creator may call this. An extension can be
+    /// granted at most once per campaign, and only while the campaign is
+    /// active and before the current deadline has elapsed. Emits
+    /// [`DeadlineExtended`].
+    ///
+    /// # Errors
+    /// - [`Error::MigrationPending`]: contract storage migration is pending.
+    /// - [`Error::CampaignNotFound`]: no campaign with `campaign_id` exists.
+    /// - [`Error::CampaignNotActive`]: campaign is not in `Active` status.
+    /// - [`Error::CampaignExpired`]: current deadline has already elapsed.
+    /// - [`Error::DeadlineAlreadyExtended`]: campaign has already used its
+    ///   one-time extension.
+    /// - [`Error::InvalidDeadlineExtension`]: `additional_seconds` is zero,
+    ///   exceeds 30 days, or overflows `u64`.
+    pub fn extend_deadline_by(
+        env: Env,
+        campaign_id: u64,
+        additional_seconds: u64,
+    ) -> Result<(), Error> {
+        Self::internal_extend_deadline(&env, campaign_id, |current| {
+            if additional_seconds == 0 || additional_seconds > MAX_DEADLINE_EXTENSION {
+                return Err(Error::InvalidDeadlineExtension);
+            }
+            current
+                .checked_add(additional_seconds)
+                .ok_or(Error::InvalidDeadlineExtension)
+        })
+    }
+
+    fn internal_extend_deadline(
+        env: &Env,
+        campaign_id: u64,
+        compute_new_deadline: impl FnOnce(u64) -> Result<u64, Error>,
+    ) -> Result<(), Error> {
+        Self::ensure_current_schema(env)?;
+        let mut campaign = storage::campaign(env, campaign_id)?;
         campaign.creator.require_auth();
-        Self::ensure_open(&env, &campaign)?;
+        Self::ensure_open(env, &campaign)?;
 
         if campaign.deadline_extended {
             return Err(Error::DeadlineAlreadyExtended);
         }
 
-        if new_deadline <= campaign.deadline
-            || new_deadline > campaign.deadline + MAX_DEADLINE_EXTENSION
-        {
-            return Err(Error::InvalidDeadlineExtension);
-        }
-
         let old_deadline = campaign.deadline;
+        let new_deadline = compute_new_deadline(old_deadline)?;
         campaign.deadline = new_deadline;
         campaign.deadline_extended = true;
-        storage::save_campaign(&env, &campaign);
-        storage::extend_milestone_due_dates_ttl(&env, campaign_id, new_deadline);
+        storage::save_campaign(env, &campaign);
+        storage::extend_milestone_due_dates_ttl(env, campaign_id, new_deadline);
 
         DeadlineExtended {
             campaign_id,
             old_deadline,
             new_deadline,
         }
-        .publish(&env);
+        .publish(env);
 
         Ok(())
     }
@@ -1907,23 +2038,37 @@ impl Aidline {
         Self::internal_approve_milestone(&env, campaign_id, campaign.verifier.clone(), proof_uri)
     }
 
-    /// Records a verifier's rejection of the next pending milestone with an explanatory reason URI.
+    /// Records a verifier's rejection of the next pending milestone with a structured reason code
+    /// and an explanatory details URI.
     ///
     /// Only the campaign's registered verifier may call this. Does not move funds or advance
-    /// milestone progress. Emits [`MilestoneRejected`].
+    /// milestone progress. If `reason` corresponds to [`RejectionReason::FraudDetected`] (`2`),
+    /// the campaign is immediately cancelled so donors can reclaim unreleased funds.
+    /// Emits [`MilestoneRejected`] (and [`CampaignCancelled`] when fraud is reported).
     ///
     /// # Errors
-    /// - [`Error::UriTooLong`]: `reason_uri` exceeds [`MAX_URI_LENGTH`] bytes.
+    /// - [`Error::MigrationPending`]: contract storage migration is pending.
+    /// - [`Error::UriTooLong`]: `details_uri` exceeds [`MAX_URI_LENGTH`] bytes.
+    /// - [`Error::InvalidRejectionReason`]: `reason` is not a valid [`RejectionReason`] code (`1..=4`).
     /// - [`Error::CampaignNotFound`]: no campaign with `campaign_id` exists.
     /// - [`Error::NotVerifier`]: the campaign verifier is no longer registered.
     /// - [`Error::CampaignNotActive`] / [`Error::CampaignExpired`]: campaign is not open.
     /// - [`Error::NoMilestonesLeft`]: all milestones have already been released.
-    pub fn reject_milestone(env: Env, campaign_id: u64, reason_uri: String) -> Result<(), Error> {
-        if reason_uri.len() > MAX_URI_LENGTH {
+    pub fn reject_milestone(
+        env: Env,
+        campaign_id: u64,
+        reason: u32,
+        details_uri: String,
+    ) -> Result<(), Error> {
+        Self::ensure_current_schema(&env)?;
+        if details_uri.len() > MAX_URI_LENGTH {
             return Err(Error::UriTooLong);
         }
 
-        let campaign = storage::campaign(&env, campaign_id)?;
+        let rejection_reason =
+            RejectionReason::from_code(reason).ok_or(Error::InvalidRejectionReason)?;
+
+        let mut campaign = storage::campaign(&env, campaign_id)?;
         campaign.verifier.require_auth();
 
         if !storage::is_verifier(&env, &campaign.verifier) {
@@ -1940,9 +2085,14 @@ impl Aidline {
         MilestoneRejected {
             campaign_id,
             index,
-            reason_uri,
+            reason,
+            details_uri,
         }
         .publish(&env);
+
+        if rejection_reason == RejectionReason::FraudDetected {
+            Self::cancel_campaign_state(&env, &mut campaign, true);
+        }
 
         Ok(())
     }
@@ -2119,13 +2269,7 @@ impl Aidline {
             return Err(Error::CampaignNotActive);
         }
 
-        campaign.status = CampaignStatus::Cancelled;
-        Self::settle_streams(&env, &mut campaign);
-        storage::save_campaign(&env, &campaign);
-        Self::close_verifier_assignments(&env, &campaign.verifiers);
-        Self::bump_all_verifiers(&env, &campaign.verifiers, |s| s.campaigns_cancelled += 1);
-
-        CampaignCancelled { campaign_id }.publish(&env);
+        Self::cancel_campaign_state(&env, &mut campaign, true);
         Ok(())
     }
 
@@ -2157,11 +2301,7 @@ impl Aidline {
             return Err(Error::CampaignNotActive);
         }
 
-        campaign.status = CampaignStatus::Cancelled;
-        Self::settle_streams(&env, &mut campaign);
-        storage::save_campaign(&env, &campaign);
-        Self::close_verifier_assignments(&env, &campaign.verifiers);
-        Self::bump_all_verifiers(&env, &campaign.verifiers, |s| s.campaigns_cancelled += 1);
+        Self::cancel_campaign_state(&env, &mut campaign, false);
 
         CampaignCancelledWithReason {
             campaign_id,
@@ -2207,6 +2347,32 @@ impl Aidline {
     }
 
     fn execute_refund(env: &Env, donor: &Address, campaign_id: u64) -> Result<i128, Error> {
+        let (campaign, amount) = Self::take_refund(env, donor, campaign_id)?;
+
+        if amount > 0 {
+            token::Client::new(env, &campaign.token).transfer(
+                &env.current_contract_address(),
+                donor,
+                &amount,
+            );
+        }
+
+        Refunded {
+            campaign_id,
+            donor: donor.clone(),
+            amount,
+        }
+        .publish(env);
+        Ok(amount)
+    }
+
+    /// Checks refund eligibility, zeroes `donor`'s contribution and returns the
+    /// campaign with the refund amount, without moving any tokens.
+    fn take_refund(
+        env: &Env,
+        donor: &Address,
+        campaign_id: u64,
+    ) -> Result<(Campaign, i128), Error> {
         Self::ensure_current_schema(env)?;
         let mut campaign = storage::campaign(env, campaign_id)?;
 
@@ -2218,12 +2384,7 @@ impl Aidline {
             if !Self::is_overdue(env, &campaign) {
                 return Err(Error::RefundNotAvailable);
             }
-            campaign.status = CampaignStatus::Cancelled;
-            Self::settle_streams(env, &mut campaign);
-            storage::save_campaign(env, &campaign);
-            Self::close_verifier_assignments(env, &campaign.verifiers);
-            Self::bump_all_verifiers(env, &campaign.verifiers, |s| s.campaigns_cancelled += 1);
-            CampaignCancelled { campaign_id }.publish(env);
+            Self::cancel_campaign_state(env, &mut campaign, true);
         } else if expired && Self::settle_streams(env, &mut campaign) {
             // A campaign that expired was never cancelled, so its streams are
             // settled the first time a refund is taken (Issue #117). Every
@@ -2246,20 +2407,83 @@ impl Aidline {
         let amount = numerator / campaign.raised;
 
         storage::set_contribution(env, campaign_id, donor, 0);
-        if amount > 0 {
-            token::Client::new(env, &campaign.token).transfer(
-                &env.current_contract_address(),
-                donor,
-                &amount,
-            );
+        Ok((campaign, amount))
+    }
+
+    /// Rolls `donor`'s refund from `from_campaign` into `to_campaign` in one call.
+    ///
+    /// The amount is computed exactly like [`refund`] and then donated to the
+    /// target with the same limits as [`donate`], but the tokens never leave the
+    /// contract. Requires auth from `donor`. Emits [`Refunded`] for the source and
+    /// [`Donated`] for the target.
+    ///
+    /// Partial rollovers are not supported: if the refund is larger than the
+    /// target's remaining goal the call fails with [`Error::GoalExceeded`] and the
+    /// donor can claim a normal refund instead. A donor's contribution is zeroed
+    /// by the rollover, so it cannot be rolled over twice or refunded afterwards.
+    ///
+    /// # Errors
+    /// - [`Error::Paused`]: the contract is paused.
+    /// - [`Error::SameCampaign`]: `from_campaign == to_campaign`.
+    /// - [`Error::CampaignNotFound`]: either campaign does not exist.
+    /// - [`Error::CampaignNotActive`] / [`Error::CampaignExpired`] /
+    ///   [`Error::MilestoneOverdue`]: the target is not open.
+    /// - [`Error::RefundNotAvailable`] / [`Error::NothingToRefund`]: as for [`refund`].
+    /// - [`Error::TokenMismatch`]: the campaigns use different tokens.
+    /// - [`Error::InvalidAmount`]: the refund amount is zero.
+    /// - [`Error::GoalExceeded`]: the refund would pass the target's goal.
+    /// - [`Error::DonationBelowMinimum`]: the refund is below the target's minimum donation.
+    pub fn rollover_refund(
+        env: Env,
+        donor: Address,
+        from_campaign: u64,
+        to_campaign: u64,
+    ) -> Result<i128, Error> {
+        donor.require_auth();
+        if storage::is_paused(&env) {
+            return Err(Error::Paused);
+        }
+        if from_campaign == to_campaign {
+            return Err(Error::SameCampaign);
         }
 
+        let mut target = storage::campaign(&env, to_campaign)?;
+        Self::ensure_open(&env, &target)?;
+
+        let (source, amount) = Self::take_refund(&env, &donor, from_campaign)?;
+        if source.token != target.token {
+            return Err(Error::TokenMismatch);
+        }
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let remaining = target.goal - target.raised;
+        if amount > remaining {
+            return Err(Error::GoalExceeded);
+        }
+        if target.min_donation > 0 && amount < target.min_donation && amount < remaining {
+            return Err(Error::DonationBelowMinimum);
+        }
+
+        target.raised += amount;
+        storage::save_campaign(&env, &target);
+        let previous = storage::contribution(&env, to_campaign, &donor);
+        storage::set_contribution(&env, to_campaign, &donor, previous + amount);
+        storage::add_campaign_donor(&env, to_campaign, &donor);
+
         Refunded {
-            campaign_id,
+            campaign_id: from_campaign,
             donor: donor.clone(),
             amount,
         }
-        .publish(env);
+        .publish(&env);
+        Donated {
+            campaign_id: to_campaign,
+            donor,
+            amount,
+        }
+        .publish(&env);
         Ok(amount)
     }
 
@@ -2284,7 +2508,14 @@ impl Aidline {
         new_verifier: Address,
     ) -> Result<(), Error> {
         storage::admin(&env).require_auth();
+        Self::reassign_verifier_impl(env, campaign_id, new_verifier)
+    }
 
+    fn reassign_verifier_impl(
+        env: Env,
+        campaign_id: u64,
+        new_verifier: Address,
+    ) -> Result<(), Error> {
         let mut campaign = storage::campaign(&env, campaign_id)?;
         Self::ensure_open(&env, &campaign)?;
 
@@ -2292,7 +2523,9 @@ impl Aidline {
             return Err(Error::MaxVerifierReassignmentsExceeded);
         }
 
-        if !storage::is_verifier(&env, &new_verifier) {
+        if new_verifier == env.current_contract_address()
+            || !storage::is_verifier(&env, &new_verifier)
+        {
             return Err(Error::NotVerifier);
         }
 
@@ -2319,6 +2552,84 @@ impl Aidline {
         .publish(&env);
 
         Ok(())
+    }
+
+    // ─── Timelock (issue #113) ────────────────────────────────────────────────
+
+    /// Queues a sensitive admin `action` and returns its id.
+    ///
+    /// Only the admin may call this. The action can be executed by anyone once
+    /// [`TIMELOCK_DELAY`] seconds have passed, and stays executable for
+    /// [`TIMELOCK_GRACE_PERIOD`] seconds after that. Emits [`ActionQueued`].
+    pub fn queue_action(env: Env, action: TimelockedAction) -> u64 {
+        storage::admin(&env).require_auth();
+        let action_id = storage::next_action_id(&env);
+        let eta = env.ledger().timestamp() + TIMELOCK_DELAY;
+        storage::save_queued_action(&env, action_id, &QueuedAction { action, eta });
+        ActionQueued { action_id, eta }.publish(&env);
+        action_id
+    }
+
+    /// Cancels a queued action before it is executed.
+    ///
+    /// Only the admin may call this. Emits [`ActionCancelled`].
+    ///
+    /// # Errors
+    /// - [`Error::ActionNotFound`]: no queued action with `action_id` exists.
+    pub fn cancel_action(env: Env, action_id: u64) -> Result<(), Error> {
+        storage::admin(&env).require_auth();
+        storage::queued_action(&env, action_id).ok_or(Error::ActionNotFound)?;
+        storage::remove_queued_action(&env, action_id);
+        ActionCancelled { action_id }.publish(&env);
+        Ok(())
+    }
+
+    /// Executes a queued action once its delay has elapsed.
+    ///
+    /// Callable by anyone. The inner action runs with the same checks as its
+    /// direct admin entry point. Emits [`ActionExecuted`].
+    ///
+    /// # Errors
+    /// - [`Error::ActionNotFound`]: no queued action with `action_id` exists.
+    /// - [`Error::TimelockNotReady`]: the delay has not elapsed yet.
+    /// - [`Error::ActionExpired`]: the grace period has passed.
+    pub fn execute_action(env: Env, action_id: u64) -> Result<(), Error> {
+        let queued = storage::queued_action(&env, action_id).ok_or(Error::ActionNotFound)?;
+        let now = env.ledger().timestamp();
+        if now < queued.eta {
+            return Err(Error::TimelockNotReady);
+        }
+        if now > queued.eta + TIMELOCK_GRACE_PERIOD {
+            return Err(Error::ActionExpired);
+        }
+        storage::remove_queued_action(&env, action_id);
+
+        match queued.action {
+            TimelockedAction::ReassignVerifier(campaign_id, new_verifier) => {
+                Self::reassign_verifier_impl(env.clone(), campaign_id, new_verifier)?
+            }
+            TimelockedAction::SlashVerifier(verifier, campaign_id, slash_amount) => {
+                Self::slash_verifier_impl(env.clone(), verifier, campaign_id, slash_amount)?
+            }
+            TimelockedAction::SetBondRequirement(amount) => {
+                if amount < 0 {
+                    return Err(Error::InvalidAmount);
+                }
+                storage::set_bond_requirement(&env, amount);
+            }
+            TimelockedAction::SetBondWithdrawDelay(delay) => {
+                storage::set_bond_withdraw_delay(&env, delay);
+            }
+        }
+
+        ActionExecuted { action_id }.publish(&env);
+        Ok(())
+    }
+
+    /// Returns the queued action `action_id`, or `None` if it was never queued,
+    /// cancelled or executed.
+    pub fn queued_action(env: Env, action_id: u64) -> Option<QueuedAction> {
+        storage::queued_action(&env, action_id)
     }
 
     // ─── Views ────────────────────────────────────────────────────────────────
@@ -2598,6 +2909,22 @@ impl Aidline {
     }
 
     // ─── Internal ─────────────────────────────────────────────────────────────
+
+    /// Transitions an active campaign to `Cancelled`, settles running streams,
+    /// releases verifier active-campaign locks, and updates verifier cancellation stats.
+    fn cancel_campaign_state(env: &Env, campaign: &mut Campaign, emit_cancelled: bool) {
+        campaign.status = CampaignStatus::Cancelled;
+        Self::settle_streams(env, campaign);
+        storage::save_campaign(env, campaign);
+        Self::close_verifier_assignments(env, &campaign.verifiers);
+        Self::bump_all_verifiers(env, &campaign.verifiers, |s| s.campaigns_cancelled += 1);
+        if emit_cancelled {
+            CampaignCancelled {
+                campaign_id: campaign.id,
+            }
+            .publish(env);
+        }
+    }
 
     fn ensure_open(env: &Env, campaign: &Campaign) -> Result<(), Error> {
         if campaign.status != CampaignStatus::Active {
