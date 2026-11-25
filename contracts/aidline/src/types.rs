@@ -126,6 +126,21 @@ pub struct SponsorPool {
     pub matched: i128,
 }
 
+/// A milestone approval waiting out its challenge window (Issue #115).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingApproval {
+    pub index: u32,
+    pub proof_uri: String,
+    pub proposed_at: u64,
+    /// Earliest timestamp at which `finalize_milestone` may release the funds.
+    pub ready_at: u64,
+    /// Contribution weight of the donors who have voted to block it.
+    pub block_weight: i128,
+    /// Distinguishes this proposal's donor votes from an earlier, blocked one.
+    pub nonce: u32,
+}
+
 /// A sensitive admin action that must wait out the timelock before it runs (Issue #113).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -269,6 +284,13 @@ pub enum DataKey {
     VerifierProfile(Address),
     // Paginated donors list
     CampaignDonors(u64),
+    // Issue #111: address allowed to slash verifier bonds (instance storage)
+    Slasher,
+    // Issue #115: challenge window between proposing and paying a milestone
+    ChallengeWindow(u64),
+    PendingApproval(u64),
+    ProposalNonce(u64),
+    BlockVote(u64, u32, Address),
     // Issue #128: donated amount not yet matched by a sponsor, per campaign and donor
     UnmatchedDonation(u64, Address),
     // Issue #113: timelock queue

@@ -2,8 +2,8 @@ use soroban_sdk::{Address, Env, String, Vec};
 
 use crate::errors::Error;
 use crate::types::{
-    Beneficiary, Campaign, DataKey, Pledge, QueuedAction, SponsorPool, Stream, VerifierBond,
-    VerifierStats,
+    Beneficiary, Campaign, DataKey, PendingApproval, Pledge, QueuedAction, SponsorPool, Stream,
+    VerifierBond, VerifierStats,
 };
 
 const DAY_IN_LEDGERS: u32 = 17_280;
@@ -77,6 +77,74 @@ pub fn set_pending_admin(env: &Env, pending: &Address) {
 
 pub fn remove_pending_admin(env: &Env) {
     env.storage().instance().remove(&DataKey::PendingAdmin);
+}
+
+/// The address that may slash verifier bonds. Defaults to the current admin,
+/// so a deployment that never calls `set_slasher` behaves as before.
+pub fn slasher(env: &Env) -> Address {
+    env.storage()
+        .instance()
+        .get(&DataKey::Slasher)
+        .unwrap_or_else(|| admin(env))
+}
+
+pub fn set_slasher(env: &Env, slasher: &Address) {
+    env.storage().instance().set(&DataKey::Slasher, slasher);
+}
+
+pub fn challenge_window(env: &Env, campaign_id: u64) -> u64 {
+    let key = DataKey::ChallengeWindow(campaign_id);
+    let window: Option<u64> = env.storage().persistent().get(&key);
+    if window.is_some() {
+        bump(env, &key);
+    }
+    window.unwrap_or(0)
+}
+
+pub fn set_challenge_window(env: &Env, campaign_id: u64, window: u64) {
+    let key = DataKey::ChallengeWindow(campaign_id);
+    env.storage().persistent().set(&key, &window);
+    bump(env, &key);
+}
+
+pub fn pending_approval(env: &Env, campaign_id: u64) -> Option<PendingApproval> {
+    let key = DataKey::PendingApproval(campaign_id);
+    let pending = env.storage().persistent().get(&key)?;
+    bump(env, &key);
+    Some(pending)
+}
+
+pub fn save_pending_approval(env: &Env, campaign_id: u64, pending: &PendingApproval) {
+    let key = DataKey::PendingApproval(campaign_id);
+    env.storage().persistent().set(&key, pending);
+    bump(env, &key);
+}
+
+pub fn remove_pending_approval(env: &Env, campaign_id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::PendingApproval(campaign_id));
+}
+
+/// Returns the next proposal number for the campaign, starting at 1.
+pub fn next_proposal_nonce(env: &Env, campaign_id: u64) -> u32 {
+    let key = DataKey::ProposalNonce(campaign_id);
+    let nonce: u32 = env.storage().persistent().get(&key).unwrap_or(0) + 1;
+    env.storage().persistent().set(&key, &nonce);
+    bump(env, &key);
+    nonce
+}
+
+pub fn has_block_vote(env: &Env, campaign_id: u64, nonce: u32, donor: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .has(&DataKey::BlockVote(campaign_id, nonce, donor.clone()))
+}
+
+pub fn set_block_vote(env: &Env, campaign_id: u64, nonce: u32, donor: &Address) {
+    let key = DataKey::BlockVote(campaign_id, nonce, donor.clone());
+    env.storage().persistent().set(&key, &true);
+    bump(env, &key);
 }
 
 pub fn token(env: &Env) -> Address {

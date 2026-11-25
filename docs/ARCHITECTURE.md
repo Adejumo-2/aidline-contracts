@@ -54,6 +54,9 @@ This provides critical funds in the first hours of a disaster without waiting fo
 - **Accounting:** The advance is recorded against milestone one (`milestones[0]`). When the verifier later formally approves milestone one, the contract only transfers the remaining balance (if any) of that milestone to the beneficiary. The total funds released for milestone one never exceed its scheduled amount.
 - **Security:** Only the registered verifier can trigger the fast track. It is only available for `Emergency` campaigns, and only once per campaign.
 
+## Resource budget tests
+
+`mod budget` in `contracts/aidline/src/test.rs` reads the host budget (CPU instructions and memory bytes) for `create_campaign`, `donate`, `apply_matching`, `approve_milestone` and `refund`, and fails if a call goes over the ceiling in its table, naming the call and the overshoot. The ceilings start at a quarter of the network's per-transaction limits. To tighten them, run `cargo test budget -- --nocapture` to print the measured numbers and set each ceiling about 25 percent above its number.
 ## Verifier track record
 
 The contract keeps a fixed-size `VerifierStats` entry per verifier, read with `verifier_stats(verifier)`. It never grows with the number of campaigns.

@@ -1,4 +1,4 @@
-.PHONY: build test fmt lint clean bindings
+.PHONY: build test fmt lint clean bindings wasm-hash
 
 build:
 	stellar contract build
@@ -14,6 +14,9 @@ lint:
 
 clean:
 	cargo clean
+
+wasm-hash:
+	./scripts/wasm-hash.sh
 
 bindings:
 	stellar contract bindings typescript --wasm target/wasm32v1-none/release/aidline.wasm --output-dir packages/aidline-bindings --overwrite

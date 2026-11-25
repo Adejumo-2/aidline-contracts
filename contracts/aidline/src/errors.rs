@@ -115,4 +115,12 @@ pub enum Error {
 
     // Metadata URI validation
     InvalidMetadataUri = 59,
+    // Challenge window
+    NoChallengeWindow = 60,
+    ProposalPending = 61,
+    NoProposal = 62,
+    WindowNotElapsed = 63,
+    InvalidChallengeWindow = 64,
+    WindowClosed = 65,
+    AlreadyChallenged = 66,
 }
