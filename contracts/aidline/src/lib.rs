@@ -54,6 +54,8 @@ const SKIP_REASON_NO_ALLOWANCE: u32 = 1;
 const SKIP_REASON_EXHAUSTED: u32 = 2;
 /// Reason code emitted in PledgeSkipped when multiplication overflows.
 const SKIP_REASON_OVERFLOW: u32 = 3;
+/// Reason code: the pledging donor's wallet holds no tokens.
+const SKIP_REASON_INSUFFICIENT_BALANCE: u32 = 4;
 
 /// Maximum duration (in seconds) for a one-time deadline extension (30 days).
 const MAX_DEADLINE_EXTENSION: u64 = 30 * 86_400;
@@ -1611,6 +1613,8 @@ impl Aidline {
         storage::save_campaign(&env, &campaign);
         let previous = storage::contribution(&env, campaign_id, &donor);
         storage::set_contribution(&env, campaign_id, &donor, previous + accepted);
+        let unmatched = storage::unmatched_donation(&env, campaign_id, &donor);
+        storage::set_unmatched_donation(&env, campaign_id, &donor, unmatched + accepted);
         storage::add_campaign_donor(&env, campaign_id, &donor);
 
         Donated {
@@ -1703,7 +1707,9 @@ impl Aidline {
     /// the campaign's raised total.
     ///
     /// Any account may call this. The match is computed as
-    /// `donation_amount * ratio_bps / 10_000`, clamped to the pool's cap
+    /// `min(donation_amount, donor's unmatched donations) * ratio_bps / 10_000`,
+    /// so only real donations that were not matched before can be matched. It is
+    /// clamped to the pool's cap
     /// headroom, remaining balance, and campaign headroom. Returns the actual
     /// matched amount (may be `0` if the pool is exhausted or the donation is
     /// too small). Emits [`MatchingApplied`] when the matched amount is > 0.
@@ -1734,7 +1740,14 @@ impl Aidline {
         let mut campaign = storage::campaign(&env, campaign_id)?;
         Self::ensure_open(&env, &campaign)?;
 
-        let raw_match = donation_amount
+        // Only real, not yet matched donations by `donor` can be matched.
+        let unmatched = storage::unmatched_donation(&env, campaign_id, &donor);
+        let eligible = donation_amount.min(unmatched);
+        if eligible <= 0 {
+            return Ok(0);
+        }
+
+        let raw_match = eligible
             .checked_mul(pool.ratio_bps as i128)
             .ok_or(Error::InvalidAmount)?
             / 10_000_i128;
@@ -1756,6 +1769,15 @@ impl Aidline {
             return Ok(0);
         }
 
+        // Consume the part of the donation that this match covers (rounded up),
+        // so the same donation cannot be matched again.
+        let consumed = eligible
+            .checked_mul(matched_amount)
+            .map(|x| (x + raw_match - 1) / raw_match)
+            .unwrap_or(eligible)
+            .min(eligible);
+        storage::set_unmatched_donation(&env, campaign_id, &donor, unmatched - consumed);
+
         pool.remaining -= matched_amount;
         pool.matched += matched_amount;
         storage::save_sponsor_pool(&env, &pool);
@@ -1770,7 +1792,7 @@ impl Aidline {
             campaign_id,
             sponsor: sponsor.clone(),
             donor,
-            donation_amount,
+            donation_amount: eligible,
             matched_amount,
         }
         .publish(&env);
@@ -2740,6 +2762,8 @@ impl Aidline {
     /// - [`Error::CampaignNotActive`]: campaign is not in `Active` status.
     /// - [`Error::CampaignExpired`]: campaign deadline has passed.
     /// - [`Error::NotVerifier`]: `new_verifier` is not currently registered.
+    /// - [`Error::ConflictOfInterest`]: `new_verifier` is the campaign's creator
+    ///   or beneficiary.
     pub fn reassign_verifier(
         env: Env,
         campaign_id: u64,
@@ -2765,6 +2789,10 @@ impl Aidline {
             || !storage::is_verifier(&env, &new_verifier)
         {
             return Err(Error::NotVerifier);
+        }
+
+        if new_verifier == campaign.beneficiary || new_verifier == campaign.creator {
+            return Err(Error::ConflictOfInterest);
         }
 
         let old_verifier = campaign.verifier.clone();
@@ -3373,6 +3401,12 @@ impl Aidline {
         let mut total_pulled: i128 = 0;
 
         for mut pledge in active_pledges.iter() {
+            // Pulled pledges count towards `raised`, which must never pass the goal.
+            let headroom = campaign.goal.saturating_sub(campaign.raised);
+            if headroom <= 0 {
+                break;
+            }
+
             let pledge_remaining = pledge.pledged_amount - pledge.pulled_amount;
 
             // Proportional share: milestone_amount * pledge_remaining / total_remaining.
@@ -3415,8 +3449,25 @@ impl Aidline {
                 continue;
             }
 
+            // The allowance only authorises spending; the wallet may be empty.
+            let balance = tok.balance(&pledge.donor);
+            if balance <= 0 {
+                PledgeSkipped {
+                    pledge_id: pledge.pledge_id,
+                    campaign_id,
+                    donor: pledge.donor.clone(),
+                    reason: SKIP_REASON_INSUFFICIENT_BALANCE,
+                }
+                .publish(env);
+                continue;
+            }
+
             // Clamp to what is actually available.
-            let pull = share.min(pledge_remaining).min(allowance);
+            let pull = share
+                .min(pledge_remaining)
+                .min(allowance)
+                .min(balance)
+                .min(headroom);
             if pull <= 0 {
                 PledgeSkipped {
                     pledge_id: pledge.pledge_id,

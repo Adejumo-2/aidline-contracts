@@ -291,6 +291,8 @@ pub enum DataKey {
     PendingApproval(u64),
     ProposalNonce(u64),
     BlockVote(u64, u32, Address),
+    // Issue #128: donated amount not yet matched by a sponsor, per campaign and donor
+    UnmatchedDonation(u64, Address),
     // Issue #113: timelock queue
     NextActionId,
     QueuedAction(u64),
