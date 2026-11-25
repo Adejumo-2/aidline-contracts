@@ -21,8 +21,8 @@ use soroban_sdk::{
 
 pub use errors::Error;
 pub use types::{
-    Beneficiary, BondStatus, Campaign, CampaignKind, CampaignStatus, Pledge, SponsorPool, Stream,
-    VerifierBond, VerifierStats,
+    Beneficiary, BondStatus, Campaign, CampaignKind, CampaignStatus, Pledge, Role, SponsorPool,
+    Stream, VerifierBond, VerifierStats,
 };
 
 use events::{
@@ -31,12 +31,15 @@ use events::{
     CancelVoted, ContractPaused, ContractUnpaused, ContractUpgraded, DeadlineExtended, Donated,
     EmergencyAdvanceReleased, MatchingApplied, MetadataUpdated, Migrated, MilestoneApproved,
     MilestoneRejected, MilestoneReleased, PlatformFeeUpdated, PledgeCancelled, PledgeCreated,
-    PledgePulled, PledgeSettlement, PledgeSkipped, Refunded, SponsorPoolDeposited,
-    SponsorPoolReturned, StreamClaimed, TokenAllowlistUpdated, TreasuryUpdated, VerifierBondPosted,
-    VerifierDeregistered, VerifierProfileUpdated, VerifierReassigned, VerifierUpdated,
+    PledgePulled, PledgeSettlement, PledgeSkipped, Refunded, RoleGranted, RoleRevoked,
+    SponsorPoolDeposited, SponsorPoolReturned, StreamClaimed, TokenAllowlistUpdated,
+    TreasuryUpdated, VerifierBondPosted, VerifierDeregistered, VerifierProfileUpdated,
+    VerifierReassigned, VerifierUpdated,
 };
 
 const MAX_MILESTONES: u32 = 20;
+/// Maximum bond withdrawal delay in seconds (90 days).
+pub const MAX_BOND_WITHDRAW_DELAY: u64 = 90 * 86_400;
 /// Maximum length in bytes for metadata and proof URIs.
 const MAX_URI_LENGTH: u32 = 256;
 /// Maximum length in bytes for milestone proof URIs.
@@ -110,39 +113,82 @@ impl Aidline {
 
     // ─── Admin ────────────────────────────────────────────────────────────────
 
-    /// Registers `verifier` as an active verifier.
+    /// Grants `role` to `account`.
     ///
-    /// Only the admin may call this function. Emits [`VerifierUpdated`] with
-    /// `active = true`.
+    /// Only the primary admin may call this. Emits [`RoleGranted`].
     ///
     /// # Errors
-    /// - [`Error::Unauthorized`]: caller is not the admin (enforced via
-    ///   `require_auth` on the stored admin address).
-    pub fn add_verifier(env: Env, verifier: Address) {
+    /// - [`Error::Unauthorized`]: caller is not the admin or `account` is the
+    ///   contract address itself.
+    pub fn grant_role(env: Env, role: Role, account: Address) -> Result<(), Error> {
         storage::admin(&env).require_auth();
+        if account == env.current_contract_address() {
+            return Err(Error::Unauthorized);
+        }
+        storage::set_role(&env, role, &account, true);
+        RoleGranted { role, account }.publish(&env);
+        Ok(())
+    }
+
+    /// Revokes `role` from `account`.
+    ///
+    /// Only the primary admin may call this. Emits [`RoleRevoked`].
+    ///
+    /// # Errors
+    /// - [`Error::Unauthorized`]: caller is not the admin.
+    pub fn revoke_role(env: Env, role: Role, account: Address) -> Result<(), Error> {
+        storage::admin(&env).require_auth();
+        storage::set_role(&env, role, &account, false);
+        RoleRevoked { role, account }.publish(&env);
+        Ok(())
+    }
+
+    /// Returns `true` if `account` holds `role` (or is the primary admin for `Role::Admin`).
+    pub fn has_role(env: Env, role: Role, account: Address) -> bool {
+        storage::has_role(&env, role, &account)
+    }
+
+    /// Registers `verifier` as an active verifier.
+    ///
+    /// Only the admin or an account with [`Role::VerifierManager`] may call
+    /// this function. Emits [`VerifierUpdated`] with `active = true`.
+    ///
+    /// # Errors
+    /// - [`Error::Unauthorized`]: `caller` lacks admin or
+    ///   [`Role::VerifierManager`] authorization, or `verifier` is the
+    ///   contract address itself.
+    pub fn add_verifier(env: Env, caller: Address, verifier: Address) -> Result<(), Error> {
+        caller.require_auth();
+        Self::require_role(&env, &caller, Role::VerifierManager)?;
+        if verifier == env.current_contract_address() {
+            return Err(Error::Unauthorized);
+        }
         storage::set_verifier(&env, &verifier, true);
         VerifierUpdated {
             verifier,
             active: true,
         }
         .publish(&env);
+        Ok(())
     }
 
     /// Deactivates `verifier`, preventing them from approving future milestones.
     ///
-    /// Only the admin may call this function. Campaigns previously assigned to
-    /// the verifier will freeze until the campaign is cancelled or reassigned
-    /// via [`reassign_verifier`]. Emits [`VerifierUpdated`] with `active = false`.
+    /// Only the admin or an account with [`Role::VerifierManager`] may call
+    /// this function. Campaigns previously assigned to the verifier will freeze
+    /// until the campaign is cancelled or reassigned via [`reassign_verifier`].
+    /// Emits [`VerifierUpdated`] with `active = false`.
     ///
     /// If the verifier has an active bond it moves to `PendingWithdrawal` (as in
     /// [`deregister_verifier`]) and [`VerifierDeregistered`] is emitted, so the
     /// bond can always be withdrawn after the delay.
     ///
     /// # Errors
-    /// - [`Error::Unauthorized`]: caller is not the admin (enforced via
-    ///   `require_auth` on the stored admin address).
-    pub fn remove_verifier(env: Env, verifier: Address) {
-        storage::admin(&env).require_auth();
+    /// - [`Error::Unauthorized`]: `caller` lacks admin or
+    ///   [`Role::VerifierManager`] authorization.
+    pub fn remove_verifier(env: Env, caller: Address, verifier: Address) -> Result<(), Error> {
+        caller.require_auth();
+        Self::require_role(&env, &caller, Role::VerifierManager)?;
         storage::set_verifier(&env, &verifier, false);
 
         if let Some(mut bond) = storage::verifier_bond(&env, &verifier)
@@ -164,6 +210,7 @@ impl Aidline {
             active: false,
         }
         .publish(&env);
+        Ok(())
     }
 
     /// Sets an off-chain profile URI for a registered `verifier`.
@@ -442,14 +489,21 @@ impl Aidline {
     /// Sets the delay (in seconds) a verifier must wait after deregistering
     /// before they can withdraw their bond.
     ///
-    /// Only the admin may call this. A non-zero delay gives the admin time to
-    /// slash a fraudulent verifier before they can withdraw funds.
+    /// Only the admin may call this. A non-zero delay gives the admin or a
+    /// slasher time to slash a fraudulent verifier before they can withdraw
+    /// funds. Capped at [`MAX_BOND_WITHDRAW_DELAY`] (90 days) to prevent
+    /// permanent lockup of verifier funds.
     ///
     /// # Errors
     /// - [`Error::Unauthorized`]: caller is not the admin.
-    pub fn set_bond_withdraw_delay(env: Env, delay: u64) {
+    /// - [`Error::InvalidAmount`]: `delay` exceeds [`MAX_BOND_WITHDRAW_DELAY`].
+    pub fn set_bond_withdraw_delay(env: Env, delay: u64) -> Result<(), Error> {
         storage::admin(&env).require_auth();
+        if delay > MAX_BOND_WITHDRAW_DELAY {
+            return Err(Error::InvalidAmount);
+        }
         storage::set_bond_withdraw_delay(&env, delay);
+        Ok(())
     }
 
     // ─── Bonded verifier registration ─────────────────────────────────────────
@@ -516,18 +570,19 @@ impl Aidline {
 
     /// Deregisters `verifier`, beginning the bond withdrawal delay countdown.
     ///
-    /// Either the verifier themselves or the admin may call this. The verifier
+    /// Either the verifier themselves, the admin, or an account with
+    /// [`Role::VerifierManager`] may call this. The verifier
     /// is removed from the active registry immediately, but their bond enters
     /// `PendingWithdrawal` status and cannot be withdrawn until the delay set
     /// by [`set_bond_withdraw_delay`] has elapsed. Emits [`VerifierDeregistered`].
     ///
     /// # Errors
-    /// - [`Error::Unauthorized`]: `caller` is neither `verifier` nor the admin.
+    /// - [`Error::Unauthorized`]: `caller` is neither `verifier`, the admin,
+    ///   nor a [`Role::VerifierManager`].
     /// - [`Error::NotVerifier`]: `verifier` is not currently registered.
     pub fn deregister_verifier(env: Env, caller: Address, verifier: Address) -> Result<(), Error> {
         caller.require_auth();
-        let admin = storage::admin(&env);
-        if caller != verifier && caller != admin {
+        if caller != verifier && Self::require_role(&env, &caller, Role::VerifierManager).is_err() {
             return Err(Error::Unauthorized);
         }
 
@@ -617,11 +672,11 @@ impl Aidline {
     /// Slashes `slash_amount` from `verifier`'s bond and credits it to
     /// `campaign_id`'s slashed recovery pool so it is distributed to donors pro-rata on refund.
     ///
-    /// Only the admin may call this. The slash amount must not exceed the
-    /// verifier's remaining bond. Emits [`BondSlashed`].
+    /// Only the admin or an account with [`Role::Slasher`] may call this.
+    /// The slash amount must not exceed the verifier's remaining bond. Emits [`BondSlashed`].
     ///
     /// # Errors
-    /// - [`Error::Unauthorized`]: caller is not the admin.
+    /// - [`Error::Unauthorized`]: `caller` lacks admin or [`Role::Slasher`] authorization.
     /// - [`Error::InvalidAmount`]: `slash_amount` is zero or negative.
     /// - [`Error::BondNotFound`]: no bond record exists for `verifier`.
     /// - [`Error::BondNotWithdrawable`]: bond has already been withdrawn.
@@ -630,11 +685,13 @@ impl Aidline {
     /// - [`Error::CampaignNotActive`]: campaign is completed.
     pub fn slash_verifier(
         env: Env,
+        caller: Address,
         verifier: Address,
         campaign_id: u64,
         slash_amount: i128,
     ) -> Result<(), Error> {
-        storage::admin(&env).require_auth();
+        caller.require_auth();
+        Self::require_role(&env, &caller, Role::Slasher)?;
 
         if slash_amount <= 0 {
             return Err(Error::InvalidAmount);
@@ -1973,6 +2030,9 @@ impl Aidline {
         }
         approvals.push_back(verifier.clone());
         storage::save_milestone_approvals(env, campaign_id, index, &approvals);
+        let mut proofs = storage::milestone_approval_proofs(env, campaign_id, index);
+        proofs.push_back(proof_uri.clone());
+        storage::save_milestone_approval_proofs(env, campaign_id, index, &proofs);
         Self::bump_verifier(env, &verifier, |s| s.milestones_approved += 1);
 
         MilestoneApproved {
@@ -2078,28 +2138,26 @@ impl Aidline {
 
     /// Stops a campaign early so donors can reclaim unreleased funds.
     ///
-    /// Only the campaign's creator or the admin may call this. The campaign
-    /// must currently be `Active`. Emits [`CampaignCancelled`].
+    /// Only the campaign's creator or an admin may call this. The campaign
+    /// must currently be `Active`. When `raised == 0`, auxiliary campaign
+    /// storage (such as milestone due dates) is cleaned up immediately.
+    /// Emits [`CampaignCancelled`].
     ///
     /// # Errors
     /// - [`Error::CampaignNotFound`]: no campaign with `campaign_id` exists.
-    /// - [`Error::Unauthorized`]: caller is neither the creator nor the admin.
+    /// - [`Error::Unauthorized`]: caller is neither the creator nor an admin.
     /// - [`Error::CampaignNotActive`]: campaign is not in `Active` status.
     pub fn cancel_campaign(env: Env, caller: Address, campaign_id: u64) -> Result<(), Error> {
         caller.require_auth();
         let mut campaign = storage::campaign(&env, campaign_id)?;
-        if caller != campaign.creator && caller != storage::admin(&env) {
+        if caller != campaign.creator && Self::require_role(&env, &caller, Role::Admin).is_err() {
             return Err(Error::Unauthorized);
         }
         if campaign.status != CampaignStatus::Active {
             return Err(Error::CampaignNotActive);
         }
 
-        campaign.status = CampaignStatus::Cancelled;
-        Self::settle_streams(&env, &mut campaign);
-        storage::save_campaign(&env, &campaign);
-        Self::close_verifier_assignments(&env, &campaign.verifiers);
-        Self::bump_all_verifiers(&env, &campaign.verifiers, |s| s.campaigns_cancelled += 1);
+        Self::finalize_cancellation(&env, &mut campaign);
 
         CampaignCancelled { campaign_id }.publish(&env);
         Ok(())
@@ -2107,13 +2165,14 @@ impl Aidline {
 
     /// Stops a campaign early with an explanatory reason URI so donors and indexers know why.
     ///
-    /// Only the campaign's creator or the admin may call this. The campaign must currently
-    /// be `Active`. `reason_uri` must not exceed [`MAX_URI_LENGTH`]. Emits [`CampaignCancelledWithReason`].
+    /// Only the campaign's creator or an admin may call this. The campaign must currently
+    /// be `Active`. `reason_uri` must not exceed [`MAX_URI_LENGTH`]. When `raised == 0`,
+    /// auxiliary campaign storage is cleaned up immediately. Emits [`CampaignCancelledWithReason`].
     ///
     /// # Errors
     /// - [`Error::UriTooLong`]: `reason_uri` exceeds [`MAX_URI_LENGTH`] bytes.
     /// - [`Error::CampaignNotFound`]: no campaign with `campaign_id` exists.
-    /// - [`Error::Unauthorized`]: caller is neither the creator nor the admin.
+    /// - [`Error::Unauthorized`]: caller is neither the creator nor an admin.
     /// - [`Error::CampaignNotActive`]: campaign is not in `Active` status.
     pub fn cancel_campaign_with_reason(
         env: Env,
@@ -2126,18 +2185,14 @@ impl Aidline {
         }
         caller.require_auth();
         let mut campaign = storage::campaign(&env, campaign_id)?;
-        if caller != campaign.creator && caller != storage::admin(&env) {
+        if caller != campaign.creator && Self::require_role(&env, &caller, Role::Admin).is_err() {
             return Err(Error::Unauthorized);
         }
         if campaign.status != CampaignStatus::Active {
             return Err(Error::CampaignNotActive);
         }
 
-        campaign.status = CampaignStatus::Cancelled;
-        Self::settle_streams(&env, &mut campaign);
-        storage::save_campaign(&env, &campaign);
-        Self::close_verifier_assignments(&env, &campaign.verifiers);
-        Self::bump_all_verifiers(&env, &campaign.verifiers, |s| s.campaigns_cancelled += 1);
+        Self::finalize_cancellation(&env, &mut campaign);
 
         CampaignCancelledWithReason {
             campaign_id,
@@ -2525,6 +2580,15 @@ impl Aidline {
         storage::milestone_approvals(&env, campaign_id, milestone_index)
     }
 
+    /// Returns the list of proof URIs submitted by verifiers who approved milestone `milestone_index`.
+    pub fn get_milestone_approval_proofs(
+        env: Env,
+        campaign_id: u64,
+        milestone_index: u32,
+    ) -> Vec<String> {
+        storage::milestone_approval_proofs(&env, campaign_id, milestone_index)
+    }
+
     /// Returns the configured approval cooldown in seconds for `campaign_id`.
     ///
     /// # Errors
@@ -2560,6 +2624,29 @@ impl Aidline {
     }
 
     // ─── Internal ─────────────────────────────────────────────────────────────
+
+    fn require_role(env: &Env, caller: &Address, role: Role) -> Result<(), Error> {
+        if *caller == storage::admin(env)
+            || storage::has_role(env, Role::Admin, caller)
+            || storage::has_role(env, role, caller)
+        {
+            Ok(())
+        } else {
+            Err(Error::Unauthorized)
+        }
+    }
+
+    fn finalize_cancellation(env: &Env, campaign: &mut Campaign) {
+        campaign.status = CampaignStatus::Cancelled;
+        if campaign.raised == 0 {
+            storage::cleanup_unfunded_campaign(env, campaign.id);
+        } else {
+            Self::settle_streams(env, campaign);
+        }
+        storage::save_campaign(env, campaign);
+        Self::close_verifier_assignments(env, &campaign.verifiers);
+        Self::bump_all_verifiers(env, &campaign.verifiers, |s| s.campaigns_cancelled += 1);
+    }
 
     fn ensure_open(env: &Env, campaign: &Campaign) -> Result<(), Error> {
         if campaign.status != CampaignStatus::Active {

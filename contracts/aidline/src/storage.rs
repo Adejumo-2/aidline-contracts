@@ -2,7 +2,7 @@ use soroban_sdk::{Address, Env, String, Vec};
 
 use crate::errors::Error;
 use crate::types::{
-    Beneficiary, Campaign, DataKey, Pledge, SponsorPool, Stream, VerifierBond, VerifierStats,
+    Beneficiary, Campaign, DataKey, Pledge, Role, SponsorPool, Stream, VerifierBond, VerifierStats,
 };
 
 const DAY_IN_LEDGERS: u32 = 17_280;
@@ -43,6 +43,28 @@ pub fn set_pending_admin(env: &Env, pending: &Address) {
 
 pub fn remove_pending_admin(env: &Env) {
     env.storage().instance().remove(&DataKey::PendingAdmin);
+}
+
+pub fn has_role(env: &Env, role: Role, who: &Address) -> bool {
+    if role == Role::Admin && *who == admin(env) {
+        return true;
+    }
+    let key = DataKey::Role(role, who.clone());
+    let granted: Option<bool> = env.storage().persistent().get(&key);
+    if granted == Some(true) {
+        bump(env, &key);
+    }
+    granted.unwrap_or(false)
+}
+
+pub fn set_role(env: &Env, role: Role, who: &Address, granted: bool) {
+    let key = DataKey::Role(role, who.clone());
+    if granted {
+        env.storage().persistent().set(&key, &true);
+        bump(env, &key);
+    } else {
+        env.storage().persistent().remove(&key);
+    }
 }
 
 pub fn token(env: &Env) -> Address {
@@ -488,6 +510,22 @@ pub fn set_milestone_due_dates(env: &Env, campaign_id: u64, due_dates: &soroban_
     bump(env, &key);
 }
 
+pub fn remove_milestone_due_dates(env: &Env, campaign_id: u64) {
+    let key = DataKey::MilestoneDueDates(campaign_id);
+    env.storage().persistent().remove(&key);
+}
+
+/// Removes persistent auxiliary records for an unfunded campaign on cancellation (Issue #169).
+pub fn cleanup_unfunded_campaign(env: &Env, campaign_id: u64) {
+    remove_milestone_due_dates(env, campaign_id);
+    env.storage()
+        .persistent()
+        .remove(&DataKey::MilestoneStreamDays(campaign_id));
+    env.storage()
+        .persistent()
+        .remove(&DataKey::CampaignStart(campaign_id));
+}
+
 // ─── Issue #9: Milestone approvals storage ───────────────────────────────────
 
 pub fn milestone_approvals(
@@ -512,6 +550,31 @@ pub fn save_milestone_approvals(
 ) {
     let key = DataKey::MilestoneApprovals(campaign_id, milestone_index);
     env.storage().persistent().set(&key, approvals);
+    bump(env, &key);
+}
+
+pub fn milestone_approval_proofs(
+    env: &Env,
+    campaign_id: u64,
+    milestone_index: u32,
+) -> soroban_sdk::Vec<String> {
+    let key = DataKey::MilestoneApprovalProofs(campaign_id, milestone_index);
+    if let Some(proofs) = env.storage().persistent().get(&key) {
+        bump(env, &key);
+        proofs
+    } else {
+        soroban_sdk::Vec::new(env)
+    }
+}
+
+pub fn save_milestone_approval_proofs(
+    env: &Env,
+    campaign_id: u64,
+    milestone_index: u32,
+    proofs: &soroban_sdk::Vec<String>,
+) {
+    let key = DataKey::MilestoneApprovalProofs(campaign_id, milestone_index);
+    env.storage().persistent().set(&key, proofs);
     bump(env, &key);
 }
 

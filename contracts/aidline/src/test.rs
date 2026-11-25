@@ -36,7 +36,7 @@ impl<'a> Setup<'a> {
         let client = AidlineClient::new(&env, &contract_id);
 
         let verifier = Address::generate(&env);
-        client.add_verifier(&verifier);
+        client.add_verifier(&admin, &verifier);
 
         Setup {
             creator: Address::generate(&env),
@@ -415,7 +415,7 @@ fn removed_verifier_cannot_approve() {
     let id = s.campaign();
     let donor = s.donor(1000);
     s.client.donate(&donor, &id, &1000);
-    s.client.remove_verifier(&s.verifier);
+    s.client.remove_verifier(&s.admin, &s.verifier);
 
     assert_eq!(
         s.client.try_approve_milestone(&id, &s.proof()),
@@ -759,7 +759,7 @@ fn emergency_fast_track_authorization() {
     let s = Setup::new();
     let id = s.campaign();
 
-    s.client.remove_verifier(&s.verifier);
+    s.client.remove_verifier(&s.admin, &s.verifier);
     assert_eq!(
         s.client.try_emergency_fast_track(&id),
         Err(Ok(Error::NotVerifier))
@@ -1356,7 +1356,7 @@ fn admin_can_reassign_verifier_on_active_campaign() {
     let s = Setup::new();
     let id = s.campaign();
     let new_v = Address::generate(&s.env);
-    s.client.add_verifier(&new_v);
+    s.client.add_verifier(&s.admin, &new_v);
 
     // reassign_verifier emits VerifierReassigned; events() returns events from
     // the most recent invocation, must be non-empty after the call.
@@ -1387,7 +1387,7 @@ fn reassign_fails_for_cancelled_campaign() {
     let s = Setup::new();
     let id = s.campaign();
     let new_v = Address::generate(&s.env);
-    s.client.add_verifier(&new_v);
+    s.client.add_verifier(&s.admin, &new_v);
 
     s.client.cancel_campaign(&s.admin, &id);
     assert_eq!(
@@ -1401,7 +1401,7 @@ fn reassign_fails_for_expired_campaign() {
     let s = Setup::new();
     let id = s.campaign();
     let new_v = Address::generate(&s.env);
-    s.client.add_verifier(&new_v);
+    s.client.add_verifier(&s.admin, &new_v);
 
     s.pass_deadline();
     assert_eq!(
@@ -1418,9 +1418,9 @@ fn new_verifier_can_approve_after_reassignment() {
     s.client.donate(&donor, &id, &1000);
 
     // Remove old verifier and reassign to a new one.
-    s.client.remove_verifier(&s.verifier);
+    s.client.remove_verifier(&s.admin, &s.verifier);
     let new_v = Address::generate(&s.env);
-    s.client.add_verifier(&new_v);
+    s.client.add_verifier(&s.admin, &new_v);
     s.client.reassign_verifier(&id, &new_v);
 
     // New verifier controls the campaign; milestone should release.
@@ -1441,9 +1441,9 @@ fn reassign_verifier_caps_at_maximum() {
     let v1 = Address::generate(&s.env);
     let v2 = Address::generate(&s.env);
     let v3 = Address::generate(&s.env);
-    s.client.add_verifier(&v1);
-    s.client.add_verifier(&v2);
-    s.client.add_verifier(&v3);
+    s.client.add_verifier(&s.admin, &v1);
+    s.client.add_verifier(&s.admin, &v2);
+    s.client.add_verifier(&s.admin, &v3);
 
     // Reassignment 1 succeeds
     s.client.reassign_verifier(&id, &v1);
@@ -1591,7 +1591,7 @@ fn admin_removal_moves_bond_to_pending_withdrawal() {
     s.client.set_bond_withdraw_delay(&(7 * DAY));
     let v = s.bonded_verifier(1_000, 100);
 
-    s.client.remove_verifier(&v);
+    s.client.remove_verifier(&s.admin, &v);
 
     assert!(!s.client.is_verifier(&v));
     let bond = s.client.get_verifier_bond(&v).unwrap();
@@ -1735,7 +1735,7 @@ fn slashing_moves_the_bond_into_the_recovery_pool_for_donors() {
     let v = s.bonded_verifier(1_000, 400);
     let id = s.campaign();
 
-    s.client.slash_verifier(&v, &id, &150);
+    s.client.slash_verifier(&s.admin, &v, &id, &150);
 
     let bond = s.client.get_verifier_bond(&v).unwrap();
     assert_eq!(bond.remaining, 250);
@@ -1755,7 +1755,7 @@ fn slashed_bond_is_split_pro_rata_among_refunding_donors() {
     s.client.donate(&donor_b, &id, &400);
     s.client.approve_milestone(&id, &s.proof()); // 300 released
 
-    s.client.slash_verifier(&v, &id, &200);
+    s.client.slash_verifier(&s.admin, &v, &id, &200);
     s.client.cancel_campaign(&s.creator, &id);
 
     // Pool = (1000 - 300) + 200 = 900, split 60/40.
@@ -1770,7 +1770,7 @@ fn slashing_the_whole_bond_marks_it_slashed() {
     let s = Setup::new();
     let v = s.bonded_verifier(1_000, 400);
     let id = s.campaign();
-    s.client.slash_verifier(&v, &id, &400);
+    s.client.slash_verifier(&s.admin, &v, &id, &400);
     assert_eq!(
         s.client.get_verifier_bond(&v).unwrap().status,
         BondStatus::Slashed
@@ -1785,15 +1785,15 @@ fn slash_validates_its_arguments() {
     let nobody = Address::generate(&s.env);
 
     assert_eq!(
-        s.client.try_slash_verifier(&v, &id, &0),
+        s.client.try_slash_verifier(&s.admin, &v, &id, &0),
         Err(Ok(Error::InvalidAmount))
     );
     assert_eq!(
-        s.client.try_slash_verifier(&nobody, &id, &10),
+        s.client.try_slash_verifier(&s.admin, &nobody, &id, &10),
         Err(Ok(Error::BondNotFound))
     );
     assert_eq!(
-        s.client.try_slash_verifier(&v, &id, &401),
+        s.client.try_slash_verifier(&s.admin, &v, &id, &401),
         Err(Ok(Error::SlashExceedsBond))
     );
 }
@@ -1804,7 +1804,7 @@ fn slash_with_unknown_campaign_fails_and_leaves_bond_untouched() {
     let v = s.bonded_verifier(1_000, 400);
 
     assert_eq!(
-        s.client.try_slash_verifier(&v, &9_999, &150),
+        s.client.try_slash_verifier(&s.admin, &v, &9_999, &150),
         Err(Ok(Error::CampaignNotFound))
     );
 
@@ -1821,7 +1821,7 @@ fn a_withdrawn_bond_cannot_be_slashed() {
     s.client.deregister_verifier(&v, &v);
     s.client.withdraw_bond(&v);
     assert_eq!(
-        s.client.try_slash_verifier(&v, &id, &10),
+        s.client.try_slash_verifier(&s.admin, &v, &id, &10),
         Err(Ok(Error::BondNotWithdrawable))
     );
 }
@@ -1841,7 +1841,7 @@ fn slashing_completed_campaign_fails_and_does_not_deduct_bond() {
     assert_eq!(s.client.get_campaign(&id).status, CampaignStatus::Completed);
 
     assert_eq!(
-        s.client.try_slash_verifier(&v, &id, &150),
+        s.client.try_slash_verifier(&s.admin, &v, &id, &150),
         Err(Ok(Error::CampaignNotActive))
     );
 
@@ -1856,7 +1856,7 @@ fn slashing_completed_campaign_fails_and_does_not_deduct_bond() {
         s.client.get_campaign(&id_cancelled).status,
         CampaignStatus::Cancelled
     );
-    s.client.slash_verifier(&v, &id_cancelled, &100);
+    s.client.slash_verifier(&s.admin, &v, &id_cancelled, &100);
     let bond_after = s.client.get_verifier_bond(&v).unwrap();
     assert_eq!(bond_after.remaining, 300);
     assert_eq!(s.client.slashed_recovery(&id_cancelled), 100);
@@ -2265,8 +2265,8 @@ fn multisig_campaign_creation_validation() {
     let v1 = s.verifier.clone();
     let v2 = Address::generate(&s.env);
     let v3 = Address::generate(&s.env);
-    s.client.add_verifier(&v2);
-    s.client.add_verifier(&v3);
+    s.client.add_verifier(&s.admin, &v2);
+    s.client.add_verifier(&s.admin, &v3);
 
     let verifiers = vec![&s.env, v1.clone(), v2.clone(), v3.clone()];
     let milestones = vec![&s.env, 500, 500];
@@ -2371,8 +2371,8 @@ fn multisig_milestone_release_requires_threshold() {
     let v1 = s.verifier.clone();
     let v2 = Address::generate(&s.env);
     let v3 = Address::generate(&s.env);
-    s.client.add_verifier(&v2);
-    s.client.add_verifier(&v3);
+    s.client.add_verifier(&s.admin, &v2);
+    s.client.add_verifier(&s.admin, &v3);
 
     let verifiers = vec![&s.env, v1.clone(), v2.clone(), v3.clone()];
     let milestones = vec![&s.env, 300, 700];
@@ -2415,7 +2415,7 @@ fn multisig_milestone_release_requires_threshold() {
 
     // Approval by non-assigned verifier -> rejected
     let v4 = Address::generate(&s.env);
-    s.client.add_verifier(&v4);
+    s.client.add_verifier(&s.admin, &v4);
     let non_assigned = s
         .client
         .try_approve_milestone_multisig(&id, &v4, &s.proof());
@@ -2460,7 +2460,7 @@ fn multisig_campaign_blocks_anonymous_approve_milestone() {
     let s = Setup::new();
     let v1 = s.verifier.clone();
     let v2 = Address::generate(&s.env);
-    s.client.add_verifier(&v2);
+    s.client.add_verifier(&s.admin, &v2);
 
     let verifiers = vec![&s.env, v1, v2];
     let milestones = vec![&s.env, 500];
@@ -2924,11 +2924,11 @@ fn test_view_is_verifier() {
     assert!(!s.client.is_verifier(&candidate));
 
     // Admin adds verifier
-    s.client.add_verifier(&candidate);
+    s.client.add_verifier(&s.admin, &candidate);
     assert!(s.client.is_verifier(&candidate));
 
     // Admin removes verifier
-    s.client.remove_verifier(&candidate);
+    s.client.remove_verifier(&s.admin, &candidate);
     assert!(!s.client.is_verifier(&candidate));
 }
 
@@ -3509,7 +3509,7 @@ fn reject_milestone_requires_verifier_auth() {
 fn reject_milestone_rejects_unregistered_verifier() {
     let s = Setup::new();
     let id = s.campaign();
-    s.client.remove_verifier(&s.verifier);
+    s.client.remove_verifier(&s.admin, &s.verifier);
 
     let reason = String::from_str(&s.env, "ipfs://rejection-reason");
     let res = s.client.try_reject_milestone(&id, &reason);
@@ -3878,22 +3878,20 @@ fn old_admin_cannot_add_verifier_after_set_admin() {
         invoke: &MockAuthInvoke {
             contract: &s.client.address,
             fn_name: "add_verifier",
-            args: (candidate.clone(),).into_val(&s.env),
+            args: (old_admin.clone(), candidate.clone()).into_val(&s.env),
             sub_invokes: &[],
         },
     };
 
-    let expected_auth_err = soroban_sdk::Error::from_type_and_code(
-        soroban_sdk::xdr::ScErrorType::Context,
-        soroban_sdk::xdr::ScErrorCode::InvalidAction,
-    );
-    let res = s.client.mock_auths(&[auth]).try_add_verifier(&candidate);
-    let err = res.unwrap_err().unwrap();
-    assert_eq!(err, expected_auth_err);
+    let res = s
+        .client
+        .mock_auths(&[auth])
+        .try_add_verifier(&old_admin, &candidate);
+    assert_eq!(res, Err(Ok(Error::Unauthorized)));
     assert!(!s.client.is_verifier(&candidate));
 
     // New admin can add verifier
-    s.client.add_verifier(&candidate);
+    s.client.add_verifier(&new_admin, &candidate);
     assert!(s.client.is_verifier(&candidate));
 }
 
@@ -3905,7 +3903,7 @@ fn old_admin_cannot_remove_verifier_after_set_admin() {
     s.client.set_admin(&new_admin);
 
     let verifier = Address::generate(&s.env);
-    s.client.add_verifier(&verifier);
+    s.client.add_verifier(&new_admin, &verifier);
     assert!(s.client.is_verifier(&verifier));
 
     let auth = MockAuth {
@@ -3913,22 +3911,20 @@ fn old_admin_cannot_remove_verifier_after_set_admin() {
         invoke: &MockAuthInvoke {
             contract: &s.client.address,
             fn_name: "remove_verifier",
-            args: (verifier.clone(),).into_val(&s.env),
+            args: (old_admin.clone(), verifier.clone()).into_val(&s.env),
             sub_invokes: &[],
         },
     };
 
-    let expected_auth_err = soroban_sdk::Error::from_type_and_code(
-        soroban_sdk::xdr::ScErrorType::Context,
-        soroban_sdk::xdr::ScErrorCode::InvalidAction,
-    );
-    let res = s.client.mock_auths(&[auth]).try_remove_verifier(&verifier);
-    let err = res.unwrap_err().unwrap();
-    assert_eq!(err, expected_auth_err);
+    let res = s
+        .client
+        .mock_auths(&[auth])
+        .try_remove_verifier(&old_admin, &verifier);
+    assert_eq!(res, Err(Ok(Error::Unauthorized)));
     assert!(s.client.is_verifier(&verifier));
 
     // New admin can remove verifier
-    s.client.remove_verifier(&verifier);
+    s.client.remove_verifier(&new_admin, &verifier);
     assert!(!s.client.is_verifier(&verifier));
 }
 
@@ -3975,16 +3971,11 @@ fn old_admin_cannot_set_bond_withdraw_delay_after_set_admin() {
         },
     };
 
-    let expected_auth_err = soroban_sdk::Error::from_type_and_code(
-        soroban_sdk::xdr::ScErrorType::Context,
-        soroban_sdk::xdr::ScErrorCode::InvalidAction,
-    );
     let res = s
         .client
         .mock_auths(&[auth])
         .try_set_bond_withdraw_delay(&86400);
-    let err = res.unwrap_err().unwrap();
-    assert_eq!(err, expected_auth_err);
+    assert_eq!(res.unwrap_err(), Err(InvokeError::Abort));
     assert_eq!(s.client.bond_withdraw_delay(), 0);
 
     // New admin can set bond withdraw delay
@@ -4007,7 +3998,7 @@ fn old_admin_cannot_slash_verifier_after_set_admin() {
         invoke: &MockAuthInvoke {
             contract: &s.client.address,
             fn_name: "slash_verifier",
-            args: (v.clone(), id, 150i128).into_val(&s.env),
+            args: (old_admin.clone(), v.clone(), id, 150i128).into_val(&s.env),
             sub_invokes: &[],
         },
     };
@@ -4015,12 +4006,12 @@ fn old_admin_cannot_slash_verifier_after_set_admin() {
     let res = s
         .client
         .mock_auths(&[auth])
-        .try_slash_verifier(&v, &id, &150);
-    assert_eq!(res.unwrap_err(), Err(InvokeError::Abort));
+        .try_slash_verifier(&old_admin, &v, &id, &150);
+    assert_eq!(res, Err(Ok(Error::Unauthorized)));
     assert_eq!(s.client.get_verifier_bond(&v).unwrap().remaining, 400);
 
     // New admin can slash verifier
-    s.client.slash_verifier(&v, &id, &150);
+    s.client.slash_verifier(&new_admin, &v, &id, &150);
     assert_eq!(s.client.get_verifier_bond(&v).unwrap().remaining, 250);
     assert_eq!(s.client.slashed_recovery(&id), 150);
 }
@@ -4034,7 +4025,7 @@ fn old_admin_cannot_reassign_verifier_after_set_admin() {
 
     let id = s.campaign();
     let new_v = Address::generate(&s.env);
-    s.client.add_verifier(&new_v);
+    s.client.add_verifier(&new_admin, &new_v);
 
     let auth = MockAuth {
         address: &old_admin,
@@ -4998,7 +4989,7 @@ mod bond_lock {
             Err(Ok(Error::VerifierHasActiveCampaigns))
         );
         // Still slashable while the campaign is open.
-        s.client.slash_verifier(&v, &id, &100);
+        s.client.slash_verifier(&s.admin, &v, &id, &100);
         assert_eq!(s.client.get_verifier_bond(&v).unwrap().remaining, 300);
 
         s.client.cancel_campaign(&s.creator, &id);
@@ -5025,7 +5016,7 @@ mod bond_lock {
                     s.client.try_withdraw_bond(&v),
                     Err(Ok(Error::VerifierHasActiveCampaigns))
                 );
-                s.client.add_verifier(&v);
+                s.client.add_verifier(&s.admin, &v);
             }
         }
         s.client.deregister_verifier(&v, &v);
@@ -5040,7 +5031,7 @@ mod bond_lock {
         let id = campaign_for(&s, &old);
         s.client.deregister_verifier(&old, &old);
         s.client.deregister_verifier(&new, &new);
-        s.client.add_verifier(&new);
+        s.client.add_verifier(&s.admin, &new);
 
         s.client.reassign_verifier(&id, &new);
 
@@ -5958,7 +5949,7 @@ mod verifier_track_record {
         s.client.approve_milestone(&id, &s.proof());
 
         let second = Address::generate(&s.env);
-        s.client.add_verifier(&second);
+        s.client.add_verifier(&s.admin, &second);
         s.client.reassign_verifier(&id, &second);
 
         // The original verifier keeps what they did; the new one is assigned.
@@ -5979,9 +5970,375 @@ mod verifier_track_record {
         let v = s.bonded_verifier(1_000, 400);
         let id = s.campaign();
 
-        s.client.slash_verifier(&v, &id, &150);
-        s.client.slash_verifier(&v, &id, &50);
+        s.client.slash_verifier(&s.admin, &v, &id, &150);
+        s.client.slash_verifier(&s.admin, &v, &id, &50);
         assert_eq!(s.client.verifier_stats(&v).total_slashed, 200);
         assert_eq!(s.client.verifier_stats(&s.verifier).total_slashed, 0);
     }
+}
+
+// ─── Issue #178: Role-based access control ───────────────────────────────────
+
+mod rbac {
+    use super::*;
+    use crate::Role;
+    use crate::storage::PERSISTENT_THRESHOLD;
+    use crate::types::DataKey;
+    use soroban_sdk::testutils::storage::Persistent;
+
+    #[test]
+    fn verifier_manager_can_add_and_remove_verifiers_but_cannot_slash_or_change_admin() {
+        let s = Setup::new();
+        let manager = Address::generate(&s.env);
+        let candidate = Address::generate(&s.env);
+
+        assert!(!s.client.has_role(&Role::VerifierManager, &manager));
+        assert!(s.client.has_role(&Role::Admin, &s.admin));
+
+        s.client.grant_role(&Role::VerifierManager, &manager);
+        assert!(s.client.has_role(&Role::VerifierManager, &manager));
+
+        // VerifierManager adds verifier without admin rights
+        s.client.add_verifier(&manager, &candidate);
+        assert!(s.client.is_verifier(&candidate));
+
+        // VerifierManager cannot slash verifier
+        let bonded = s.bonded_verifier(1_000, 400);
+        let id = s.campaign();
+        assert_eq!(
+            s.client.try_slash_verifier(&manager, &bonded, &id, &100),
+            Err(Ok(Error::Unauthorized))
+        );
+
+        // VerifierManager cannot transfer admin (requires primary admin auth)
+        let auth = MockAuth {
+            address: &manager,
+            invoke: &MockAuthInvoke {
+                contract: &s.client.address,
+                fn_name: "set_admin",
+                args: (manager.clone(),).into_val(&s.env),
+                sub_invokes: &[],
+            },
+        };
+        let res = s.client.mock_auths(&[auth]).try_set_admin(&manager);
+        assert!(res.is_err());
+        assert_eq!(s.client.admin(), s.admin);
+
+        // VerifierManager can remove verifier
+        s.client.remove_verifier(&manager, &candidate);
+        assert!(!s.client.is_verifier(&candidate));
+
+        // Revocation immediately prevents further privileged execution
+        s.client.revoke_role(&Role::VerifierManager, &manager);
+        assert!(!s.client.has_role(&Role::VerifierManager, &manager));
+        assert_eq!(
+            s.client.try_add_verifier(&manager, &candidate),
+            Err(Ok(Error::Unauthorized))
+        );
+        assert_eq!(
+            s.client.try_remove_verifier(&manager, &s.verifier),
+            Err(Ok(Error::Unauthorized))
+        );
+    }
+
+    #[test]
+    fn slasher_can_slash_but_cannot_change_admin_and_revoke_blocks_slashing() {
+        let s = Setup::new();
+        let slasher = Address::generate(&s.env);
+        let stranger = Address::generate(&s.env);
+        let v = s.bonded_verifier(1_000, 400);
+        let id = s.campaign();
+
+        // Non-slasher attempting slash_verifier gets Unauthorized
+        assert_eq!(
+            s.client.try_slash_verifier(&stranger, &v, &id, &100),
+            Err(Ok(Error::Unauthorized))
+        );
+
+        // Grant Slasher role to account B
+        s.client.grant_role(&Role::Slasher, &slasher);
+        assert!(s.client.has_role(&Role::Slasher, &slasher));
+
+        // Account B can slash
+        s.client.slash_verifier(&slasher, &v, &id, &150);
+        assert_eq!(s.client.get_verifier_bond(&v).unwrap().remaining, 250);
+        assert_eq!(s.client.slashed_recovery(&id), 150);
+
+        // Account B cannot add/remove verifiers
+        let candidate = Address::generate(&s.env);
+        assert_eq!(
+            s.client.try_add_verifier(&slasher, &candidate),
+            Err(Ok(Error::Unauthorized))
+        );
+
+        // Account B cannot change admin or grant roles
+        let auth_admin = MockAuth {
+            address: &slasher,
+            invoke: &MockAuthInvoke {
+                contract: &s.client.address,
+                fn_name: "set_admin",
+                args: (slasher.clone(),).into_val(&s.env),
+                sub_invokes: &[],
+            },
+        };
+        assert!(
+            s.client
+                .mock_auths(&[auth_admin])
+                .try_set_admin(&slasher)
+                .is_err()
+        );
+        assert_eq!(s.client.admin(), s.admin);
+
+        let auth_grant = MockAuth {
+            address: &slasher,
+            invoke: &MockAuthInvoke {
+                contract: &s.client.address,
+                fn_name: "grant_role",
+                args: (Role::Slasher, stranger.clone()).into_val(&s.env),
+                sub_invokes: &[],
+            },
+        };
+        assert!(
+            s.client
+                .mock_auths(&[auth_grant])
+                .try_grant_role(&Role::Slasher, &stranger)
+                .is_err()
+        );
+
+        // Revoke role -> B can no longer slash
+        s.client.revoke_role(&Role::Slasher, &slasher);
+        assert!(!s.client.has_role(&Role::Slasher, &slasher));
+        assert_eq!(
+            s.client.try_slash_verifier(&slasher, &v, &id, &50),
+            Err(Ok(Error::Unauthorized))
+        );
+    }
+
+    #[test]
+    fn role_admin_delegation_and_self_rejection() {
+        let s = Setup::new();
+        let co_admin = Address::generate(&s.env);
+        let candidate = Address::generate(&s.env);
+
+        // Contract address cannot be granted a role
+        assert_eq!(
+            s.client.try_grant_role(&Role::Slasher, &s.client.address),
+            Err(Ok(Error::Unauthorized))
+        );
+
+        // Delegated Role::Admin can execute verifier and slashing actions
+        s.client.grant_role(&Role::Admin, &co_admin);
+        assert!(s.client.has_role(&Role::Admin, &co_admin));
+        s.client.add_verifier(&co_admin, &candidate);
+        assert!(s.client.is_verifier(&candidate));
+
+        let id = s.campaign();
+        s.client.cancel_campaign(&co_admin, &id);
+        assert_eq!(s.client.get_campaign(&id).status, CampaignStatus::Cancelled);
+
+        s.client.revoke_role(&Role::Admin, &co_admin);
+        assert!(!s.client.has_role(&Role::Admin, &co_admin));
+        assert_eq!(
+            s.client
+                .try_add_verifier(&co_admin, &Address::generate(&s.env)),
+            Err(Ok(Error::Unauthorized))
+        );
+    }
+
+    #[test]
+    fn role_entry_ttl_is_extended_on_write_and_read() {
+        let s = Setup::new();
+        let manager = Address::generate(&s.env);
+        s.client.grant_role(&Role::VerifierManager, &manager);
+
+        let key = DataKey::Role(Role::VerifierManager, manager.clone());
+        let initial_ttl = s.env.as_contract(&s.client.address, || {
+            s.env.storage().persistent().get_ttl(&key)
+        });
+        assert!(initial_ttl >= PERSISTENT_THRESHOLD);
+
+        s.env
+            .ledger()
+            .set_sequence_number(s.env.ledger().sequence() + 10 * 17_280);
+        let aged_ttl = s.env.as_contract(&s.client.address, || {
+            s.env.storage().persistent().get_ttl(&key)
+        });
+        assert!(aged_ttl < PERSISTENT_THRESHOLD);
+
+        assert!(s.client.has_role(&Role::VerifierManager, &manager));
+        let refreshed_ttl = s.env.as_contract(&s.client.address, || {
+            s.env.storage().persistent().get_ttl(&key)
+        });
+        assert!(refreshed_ttl >= PERSISTENT_THRESHOLD);
+    }
+}
+
+// ─── Issue #177: Bond withdrawal delay upper bound ───────────────────────────
+
+#[test]
+fn bond_withdraw_delay_is_capped_at_90_days() {
+    let s = Setup::new();
+
+    // 0 days succeeds
+    s.client.set_bond_withdraw_delay(&0);
+    assert_eq!(s.client.bond_withdraw_delay(), 0);
+
+    // Exactly 90 days succeeds
+    let max_delay = 90 * DAY;
+    assert_eq!(max_delay, crate::MAX_BOND_WITHDRAW_DELAY);
+    s.client.set_bond_withdraw_delay(&max_delay);
+    assert_eq!(s.client.bond_withdraw_delay(), max_delay);
+
+    // 90 days + 1 second fails with InvalidAmount
+    assert_eq!(
+        s.client.try_set_bond_withdraw_delay(&(max_delay + 1)),
+        Err(Ok(Error::InvalidAmount))
+    );
+
+    // 91 days fails with InvalidAmount
+    assert_eq!(
+        s.client.try_set_bond_withdraw_delay(&(91 * DAY)),
+        Err(Ok(Error::InvalidAmount))
+    );
+
+    // u64::MAX fails with InvalidAmount
+    assert_eq!(
+        s.client.try_set_bond_withdraw_delay(&u64::MAX),
+        Err(Ok(Error::InvalidAmount))
+    );
+
+    // Stored delay remains unchanged at 90 days
+    assert_eq!(s.client.bond_withdraw_delay(), max_delay);
+}
+
+// ─── Issue #172: Multisig milestone proof URI collection ─────────────────────
+
+#[test]
+fn multisig_collects_proof_uris_from_all_approving_verifiers() {
+    let s = Setup::new();
+    let v1 = s.verifier.clone();
+    let v2 = Address::generate(&s.env);
+    let v3 = Address::generate(&s.env);
+    s.client.add_verifier(&s.admin, &v2);
+    s.client.add_verifier(&s.admin, &v3);
+
+    let verifiers = vec![&s.env, v1.clone(), v2.clone(), v3.clone()];
+    let milestones = vec![&s.env, 400, 600];
+    let deadline = s.env.ledger().timestamp() + 30 * DAY;
+    let id = s.client.create_multisig_campaign(
+        &s.creator,
+        &s.beneficiary,
+        &verifiers,
+        &2,
+        &s.token.address,
+        &CampaignKind::Climate,
+        &String::from_str(&s.env, "ipfs://multisig-proofs"),
+        &deadline,
+        &milestones,
+    );
+
+    let donor = s.donor(1_000);
+    s.client.donate(&donor, &id, &1_000);
+
+    let proof1 = String::from_str(&s.env, "ipfs://proof-v1");
+    let proof2 = String::from_str(&s.env, "ipfs://proof-v2");
+
+    // Verifier 1 approves -> MilestoneApproved event emitted, no token transfer yet
+    assert_eq!(s.client.approve_milestone_multisig(&id, &v1, &proof1), 0);
+    assert!(!s.env.events().all().events().is_empty());
+    assert_eq!(s.token.balance(&s.beneficiary), 0);
+
+    // Duplicate approval by v1 fails and does not duplicate proof URI
+    assert_eq!(
+        s.client.try_approve_milestone_multisig(&id, &v1, &proof2),
+        Err(Ok(Error::DuplicateApproval))
+    );
+
+    // Verifier 2 approves -> milestone 0 released and tokens transferred
+    assert_eq!(s.client.approve_milestone_multisig(&id, &v2, &proof2), 400);
+    assert_eq!(s.token.balance(&s.beneficiary), 400);
+
+    let collected_proofs = s.client.get_milestone_approval_proofs(&id, &0);
+    assert_eq!(collected_proofs.len(), 2);
+    assert_eq!(collected_proofs.get(0).unwrap(), proof1);
+    assert_eq!(collected_proofs.get(1).unwrap(), proof2);
+
+    let approvers = s.client.get_milestone_approvals(&id, &0);
+    assert_eq!(approvers, vec![&s.env, v1, v2]);
+}
+
+// ─── Issue #169: Unfunded campaign cancellation & storage cleanup ────────────
+
+#[test]
+fn creator_can_cancel_unfunded_campaign_and_clean_up_storage() {
+    use crate::types::DataKey;
+
+    let s = Setup::new();
+    let v = s.bonded_verifier(1_000, 200);
+    let now = s.env.ledger().timestamp();
+    let due_dates = vec![&s.env, now + 10 * DAY, now + 20 * DAY];
+    let milestones = vec![&s.env, 300, 700];
+
+    let id = s.client.create_campaign_with_due_dates(
+        &s.creator,
+        &s.beneficiary,
+        &v,
+        &s.token.address,
+        &CampaignKind::Climate,
+        &String::from_str(&s.env, "ipfs://mistake"),
+        &(now + 30 * DAY),
+        &milestones,
+        &due_dates,
+    );
+    assert_eq!(s.client.milestone_due_dates(&id), due_dates);
+
+    // Creator cancels immediately with raised == 0
+    s.client.cancel_campaign(&s.creator, &id);
+    assert!(!s.env.events().all().events().is_empty());
+
+    let c = s.client.get_campaign(&id);
+    assert_eq!(c.status, CampaignStatus::Cancelled);
+    assert_eq!(c.raised, 0);
+
+    // Orphaned milestone due date and auxiliary records are removed
+    assert!(s.client.milestone_due_dates(&id).is_empty());
+    let (has_due_dates, has_start) = s.env.as_contract(&s.client.address, || {
+        (
+            s.env
+                .storage()
+                .persistent()
+                .has(&DataKey::MilestoneDueDates(id)),
+            s.env
+                .storage()
+                .persistent()
+                .has(&DataKey::CampaignStart(id)),
+        )
+    });
+    assert!(!has_due_dates);
+    assert!(!has_start);
+
+    // No refunds can be claimed
+    let stranger = Address::generate(&s.env);
+    assert_eq!(s.client.refundable_amount(&id, &stranger), 0);
+    assert_eq!(
+        s.client.try_refund(&stranger, &id),
+        Err(Ok(Error::NothingToRefund))
+    );
+
+    // Verifier assignment was closed so they can deregister and withdraw bond
+    s.client.deregister_verifier(&v, &v);
+    assert_eq!(s.client.withdraw_bond(&v), 200);
+}
+
+#[test]
+fn cancelling_funded_campaign_uses_standard_refund_flow() {
+    let s = Setup::new();
+    let id = s.campaign();
+    let donor = s.donor(500);
+    s.client.donate(&donor, &id, &500);
+
+    s.client.cancel_campaign(&s.creator, &id);
+    assert_eq!(s.client.get_campaign(&id).status, CampaignStatus::Cancelled);
+    assert_eq!(s.client.refundable_amount(&id, &donor), 500);
+    assert_eq!(s.client.refund(&donor, &id), 500);
 }
