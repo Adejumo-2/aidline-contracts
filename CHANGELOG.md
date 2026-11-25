@@ -18,14 +18,18 @@ All notable changes to this project are documented here. The format follows [Kee
 - Pledges that fund future milestones on approval (#30, @oladayo2222)
 - Admin can reassign a campaign's verifier (#4, @RaymondAbiola)
 - `AdminChanged` and `VerifierReassigned` events (#2, @RaymondAbiola)
+- Permissionless `bump_campaign_ttl` keeper call that renews a campaign, its due dates and campaign-wide entries, and the instance entry (#185)
 - Doc comments on every public function (#1, @RaymondAbiola), a resource cost table and exact event assertions in tests (#24, #25, @oladayo2222)
 
 ### Fixed
 
+- Every state-changing entry point extends the instance entry, so a deployment that stops creating campaigns no longer lets its admin, token and counters expire (#183)
+- Milestone due dates stay in storage until past the campaign deadline, so overdue milestones keep opening refunds on campaigns longer than 120 days (#184)
 - Fuzz harness now builds and the CI fuzz job runs from the repository root
 
 ### Changed
 
+- Fewer storage host calls: a campaign loaded and written back in one call has its TTL extended once, refunds skip the due-date read on ended campaigns and the stream scan on cancelled ones, and milestone approval reads the treasury only when a fee is set (#186)
 - **Migration note**: The `Campaign` struct now stores its own `token: Address` field. Campaign creation entry points (`create_campaign`, `create_multisig_campaign`, `create_campaign_with_due_dates`, `create_multisig_with_due_dates`) now take `token: Address`, which must be approved on the admin token allowlist. All campaign donations, milestone releases, sponsor pools, pledges, and refunds now operate in the campaign's specified token.
 
 ## [0.1.0] - 2026-10-04
