@@ -78,6 +78,38 @@ fn matching_credits_the_campaign_at_the_pool_ratio() {
 }
 
 #[test]
+fn matching_ignores_donors_who_never_donated() {
+    let s = Setup::new();
+    let id = s.campaign();
+    let sponsor = s.donor(10_000);
+    let stranger = s.donor(1_000);
+    s.client
+        .deposit_sponsor_pool(&sponsor, &id, &10_000, &500, &500);
+
+    assert_eq!(s.client.apply_matching(&sponsor, &id, &stranger, &400), 0);
+    let pool = s.client.get_sponsor_pool(&id, &sponsor).unwrap();
+    assert_eq!(pool.remaining, 500);
+    assert_eq!(s.client.get_campaign(&id).raised, 0);
+}
+
+#[test]
+fn matching_is_capped_to_the_actual_donation_and_cannot_repeat() {
+    let s = Setup::new();
+    let id = s.campaign();
+    let sponsor = s.donor(10_000);
+    let donor = s.donor(1_000);
+    s.client
+        .deposit_sponsor_pool(&sponsor, &id, &10_000, &500, &500);
+
+    s.client.donate(&donor, &id, &100);
+    // Claims 400 but only 100 was donated.
+    assert_eq!(s.client.apply_matching(&sponsor, &id, &donor, &400), 100);
+    // The same donation cannot be matched twice.
+    assert_eq!(s.client.apply_matching(&sponsor, &id, &donor, &400), 0);
+    assert_eq!(s.client.get_sponsor_pool(&id, &sponsor).unwrap().matched, 100);
+}
+
+#[test]
 fn matching_stops_at_the_pool_cap() {
     let s = Setup::new();
     let id = s.campaign();

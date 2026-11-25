@@ -269,6 +269,8 @@ pub enum DataKey {
     VerifierProfile(Address),
     // Paginated donors list
     CampaignDonors(u64),
+    // Issue #128: donated amount not yet matched by a sponsor, per campaign and donor
+    UnmatchedDonation(u64, Address),
     // Issue #113: timelock queue
     NextActionId,
     QueuedAction(u64),

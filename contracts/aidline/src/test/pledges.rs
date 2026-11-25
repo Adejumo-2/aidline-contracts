@@ -75,6 +75,70 @@ fn a_pledge_moves_no_money_until_a_milestone_is_approved() {
 }
 
 #[test]
+fn pledgor_with_an_empty_wallet_does_not_block_milestone_approval() {
+    let s = Setup::new();
+    let id = s.campaign();
+    let pledger = s.donor(300);
+    let donor = s.donor(300);
+    let expiry = s.env.ledger().sequence() + 1_000;
+    s.token.approve(&pledger, &s.client.address, &500, &expiry);
+    let pledge_id = s.client.create_pledge(&pledger, &id, &300);
+
+    // The pledgor moves their tokens away after pledging.
+    s.token.transfer(&pledger, &donor, &300);
+    assert_eq!(s.token.balance(&pledger), 0);
+
+    s.client.donate(&donor, &id, &300);
+    s.client.approve_milestone(&id, &s.proof());
+    assert!(!s.env.events().all().events().is_empty(), "PledgeSkipped");
+
+    assert_eq!(s.token.balance(&s.beneficiary), 300);
+    let pledge = s.client.get_pledge(&pledge_id).unwrap();
+    assert_eq!(pledge.pulled_amount, 0);
+    assert!(pledge.active);
+}
+
+#[test]
+fn pledge_pull_is_limited_to_the_wallet_balance() {
+    let s = Setup::new();
+    let id = s.campaign();
+    let pledger = s.donor(300);
+    let donor = s.donor(500);
+    let expiry = s.env.ledger().sequence() + 1_000;
+    s.token.approve(&pledger, &s.client.address, &300, &expiry);
+    let pledge_id = s.client.create_pledge(&pledger, &id, &300);
+
+    s.token.transfer(&pledger, &donor, &200);
+    s.client.donate(&donor, &id, &200);
+    s.client.approve_milestone(&id, &s.proof());
+
+    assert_eq!(s.token.balance(&pledger), 0);
+    assert_eq!(s.client.get_pledge(&pledge_id).unwrap().pulled_amount, 100);
+    assert_eq!(s.token.balance(&s.beneficiary), 300);
+}
+
+#[test]
+fn pledge_pulls_never_push_raised_past_the_goal() {
+    let s = Setup::new();
+    let id = s.campaign(); // Goal 1000
+    let pledger = s.donor(1_000);
+    let donor = s.donor(900);
+    let expiry = s.env.ledger().sequence() + 1_000;
+    s.token.approve(&pledger, &s.client.address, &300, &expiry);
+    let pledge_id = s.client.create_pledge(&pledger, &id, &300);
+
+    s.client.donate(&donor, &id, &900);
+    s.client.approve_milestone(&id, &s.proof()); // Milestone of 300
+
+    let campaign = s.client.get_campaign(&id);
+    assert_eq!(campaign.raised, 1_000);
+    assert!(campaign.raised <= campaign.goal);
+    // Only the 100 of headroom is pulled from the pledge.
+    assert_eq!(s.client.get_pledge(&pledge_id).unwrap().pulled_amount, 100);
+    assert_eq!(s.token.balance(&pledger), 900);
+}
+
+#[test]
 fn donor_can_cancel_pledge() {
     let s = Setup::new();
     let id = s.campaign();

@@ -122,3 +122,23 @@ fn verifier_reassignments_view_errors_for_nonexistent_campaign() {
     let res = s.client.try_verifier_reassignments(&999_999);
     assert_eq!(res, Err(Ok(Error::CampaignNotFound)));
 }
+
+#[test]
+fn reassigning_to_the_beneficiary_or_creator_is_rejected() {
+    let s = Setup::new();
+    let id = s.campaign();
+    s.client.add_verifier(&s.beneficiary);
+    s.client.add_verifier(&s.creator);
+
+    assert_eq!(
+        s.client.try_reassign_verifier(&id, &s.beneficiary),
+        Err(Ok(Error::ConflictOfInterest))
+    );
+    assert_eq!(
+        s.client.try_reassign_verifier(&id, &s.creator),
+        Err(Ok(Error::ConflictOfInterest))
+    );
+    assert_eq!(s.client.get_campaign(&id).verifier, s.verifier);
+    assert_eq!(s.client.verifier_reassignments(&id), 0);
+}
+
