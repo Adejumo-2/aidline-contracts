@@ -150,7 +150,7 @@ contracts/aidline/src/
   storage.rs   storage helpers and TTL management
   events.rs    events emitted for indexers
   errors.rs    contract error codes
-  test.rs      unit tests
+  test/        unit tests, one module per area
 docs/          architecture and design notes
 scripts/       deployment helpers
 ```

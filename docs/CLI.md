@@ -71,6 +71,7 @@ stellar keys generate sponsor1 --network testnet --fund
   - [bond_withdraw_delay](#bond_withdraw_delay)
   - [get_sponsor_pool](#get_sponsor_pool)
   - [get_pledge](#get_pledge)
+  - [bump_campaign_ttl](#bump_campaign_ttl)
   - [extend_campaign_ttl](#extend_campaign_ttl)
 
 ---
@@ -578,9 +579,22 @@ stellar contract invoke \
   --pledge_id 0
 ```
 
+### `bump_campaign_ttl`
+
+Extends the storage TTL of a campaign, its due dates and other campaign-wide entries, and the contract instance. Needs no authorization, so a keeper can call it for long-running campaigns.
+
+```sh
+stellar contract invoke \
+  --id $AIDLINE_CONTRACT_ID \
+  --source keeper \
+  --network testnet \
+  -- bump_campaign_ttl \
+  --campaign_id 0
+```
+
 ### `extend_campaign_ttl`
 
-Extends the contract storage TTL for a campaign entry, ensuring long-running campaigns remain active in ledger storage.
+Same as [`bump_campaign_ttl`](#bump_campaign_ttl), kept under its earlier name.
 
 ```sh
 stellar contract invoke \

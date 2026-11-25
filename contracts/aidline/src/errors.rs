@@ -81,6 +81,14 @@ pub enum Error {
     // Milestone due date
     MilestoneOverdue = 42,
 
+    // Timelock
+    ActionNotFound = 43,
+    TimelockNotReady = 44,
+    ActionExpired = 45,
+
+    // Refund rollover
+    SameCampaign = 46,
+    TokenMismatch = 47,
     // Split payouts
     InvalidBeneficiaries = 48,
 
@@ -101,4 +109,20 @@ pub enum Error {
 
     // Proof URI validation
     InvalidProofUri = 57,
+
+    // Milestone rejection reason validation
+    InvalidRejectionReason = 58,
+
+    // Metadata URI validation
+    InvalidMetadataUri = 59,
+    // Challenge window
+    NoChallengeWindow = 60,
+    ProposalPending = 61,
+    NoProposal = 62,
+    WindowNotElapsed = 63,
+    InvalidChallengeWindow = 64,
+    WindowClosed = 65,
+    AlreadyChallenged = 66,
 }
+
+

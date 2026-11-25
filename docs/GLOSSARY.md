@@ -111,7 +111,7 @@ The account address configured by the contract admin to receive platform fees de
 
 ### TTL Extension
 The operation that bumps the Time-To-Live (storage expiration) of persistent Soroban ledger entries (e.g. long-running climate campaigns and donor contributions) to keep them alive on-chain indefinitely without requiring transaction authentication.
-- **Related functions**: [`extend_campaign_ttl`](../contracts/aidline/src/lib.rs)
+- **Related functions**: [`bump_campaign_ttl`](../contracts/aidline/src/lib.rs), [`extend_campaign_ttl`](../contracts/aidline/src/lib.rs)
 - **Reference**: [Architecture: Storage](ARCHITECTURE.md#storage)
 
 ### Verifier
