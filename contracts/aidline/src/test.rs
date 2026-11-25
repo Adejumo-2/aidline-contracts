@@ -3883,13 +3883,8 @@ fn old_admin_cannot_add_verifier_after_set_admin() {
         },
     };
 
-    let expected_auth_err = soroban_sdk::Error::from_type_and_code(
-        soroban_sdk::xdr::ScErrorType::Context,
-        soroban_sdk::xdr::ScErrorCode::InvalidAction,
-    );
     let res = s.client.mock_auths(&[auth]).try_add_verifier(&candidate);
-    let err = res.unwrap_err().unwrap();
-    assert_eq!(err, expected_auth_err);
+    assert_eq!(res.unwrap_err(), Err(InvokeError::Abort));
     assert!(!s.client.is_verifier(&candidate));
 
     // New admin can add verifier
@@ -5634,6 +5629,89 @@ mod ttl {
         assert_extended(&s, allowed_key);
     }
 
+    #[test]
+    fn is_verifier_extends_ttl_to_persistent_bump_and_ignores_unknown() {
+        use crate::storage::PERSISTENT_BUMP;
+
+        let s = Setup::new();
+        let unknown = Address::generate(&s.env);
+
+        s.env
+            .ledger()
+            .set_sequence_number(s.env.ledger().sequence() + 10 * 17_280);
+
+        let verifier_key = DataKey::Verifier(s.verifier.clone());
+        let unknown_key = DataKey::Verifier(unknown.clone());
+        assert!(ttl(&s, &verifier_key) < PERSISTENT_THRESHOLD);
+
+        assert!(s.client.is_verifier(&s.verifier));
+        assert_eq!(ttl(&s, &verifier_key), PERSISTENT_BUMP);
+
+        assert!(!s.client.is_verifier(&unknown));
+        let has_unknown = s.env.as_contract(&s.client.address, || {
+            s.env.storage().persistent().has(&unknown_key)
+        });
+        assert!(!has_unknown);
+    }
+
+    #[test]
+    fn contribution_of_extends_ttl_to_persistent_bump_and_protects_long_running_refund() {
+        use crate::storage::PERSISTENT_BUMP;
+
+        let s = Setup::new();
+        let day_in_ledgers = 17_280;
+        let future = s.env.ledger().timestamp() + 400 * DAY;
+        let id = s.client.create_campaign(
+            &s.creator,
+            &s.beneficiary,
+            &s.verifier,
+            &s.token.address,
+            &CampaignKind::Climate,
+            &String::from_str(&s.env, "ipfs://climate-1yr"),
+            &future,
+            &vec![&s.env, 1_000],
+        );
+
+        let donor = s.donor(500);
+        let non_donor = Address::generate(&s.env);
+        s.client.donate(&donor, &id, &500);
+
+        let contribution_key = DataKey::Contribution(id, donor.clone());
+        let non_donor_key = DataKey::Contribution(id, non_donor.clone());
+
+        // Advance to day 100 (within extension window, before 120-day expiry)
+        s.env
+            .ledger()
+            .set_sequence_number(s.env.ledger().sequence() + 100 * day_in_ledgers);
+        assert!(ttl(&s, &contribution_key) < PERSISTENT_THRESHOLD);
+
+        // Querying contribution_of refreshes the contribution TTL to PERSISTENT_BUMP
+        assert_eq!(s.client.contribution_of(&id, &donor), 500);
+        assert_eq!(ttl(&s, &contribution_key), PERSISTENT_BUMP);
+
+        // Querying for a non-donor does not mutate storage
+        assert_eq!(s.client.contribution_of(&id, &non_donor), 0);
+        let has_non_donor = s.env.as_contract(&s.client.address, || {
+            s.env.storage().persistent().has(&non_donor_key)
+        });
+        assert!(!has_non_donor);
+
+        // Refresh campaign and advance past 120 days (to day 150) and past deadline
+        s.client.extend_campaign_ttl(&id);
+        s.env
+            .ledger()
+            .set_sequence_number(s.env.ledger().sequence() + 50 * day_in_ledgers);
+        s.env.ledger().set_timestamp(future + 1);
+
+        // Contribution record survived past the original 120-day TTL
+        assert_eq!(s.client.contribution_of(&id, &donor), 500);
+
+        // Refund succeeds on the expired long-running campaign
+        let refunded = s.client.refund(&donor, &id);
+        assert_eq!(refunded, 500);
+        assert_eq!(s.token.balance(&donor), 500);
+    }
+
     /// The instance entry (admin, token, counters, fees) is extended by every
     /// campaign call, not only by the constructor and `create_campaign`.
     #[test]
@@ -5984,4 +6062,105 @@ mod verifier_track_record {
         assert_eq!(s.client.verifier_stats(&v).total_slashed, 200);
         assert_eq!(s.client.verifier_stats(&s.verifier).total_slashed, 0);
     }
+}
+
+// ─── Issues #179 & #180: reject contract address as beneficiary or verifier ───
+
+#[test]
+fn create_campaign_rejects_contract_address_as_beneficiary() {
+    let s = Setup::new();
+    let contract_addr = s.client.address.clone();
+    let future = s.env.ledger().timestamp() + DAY;
+    let uri = String::from_str(&s.env, "ipfs://relief");
+
+    let res = s.client.try_create_campaign(
+        &s.creator,
+        &contract_addr,
+        &s.verifier,
+        &s.token.address,
+        &CampaignKind::Emergency,
+        &uri,
+        &future,
+        &vec![&s.env, 100],
+    );
+    assert_eq!(res, Err(Ok(Error::Unauthorized)));
+
+    // Split-payout campaign also rejects contract address in any beneficiary slot
+    let split = vec![
+        &s.env,
+        crate::Beneficiary {
+            to: s.beneficiary.clone(),
+            bps: 5_000,
+        },
+        crate::Beneficiary {
+            to: contract_addr,
+            bps: 5_000,
+        },
+    ];
+    let split_res = s.client.try_create_campaign_beneficiaries(
+        &s.creator,
+        &split,
+        &s.verifier,
+        &s.token.address,
+        &CampaignKind::Emergency,
+        &uri,
+        &future,
+        &vec![&s.env, 100],
+    );
+    assert_eq!(split_res, Err(Ok(Error::Unauthorized)));
+
+    // External beneficiary succeeds
+    let ok_res = s.client.try_create_campaign(
+        &s.creator,
+        &s.beneficiary,
+        &s.verifier,
+        &s.token.address,
+        &CampaignKind::Emergency,
+        &uri,
+        &future,
+        &vec![&s.env, 100],
+    );
+    assert!(ok_res.is_ok());
+}
+
+#[test]
+fn rejects_contract_address_as_verifier() {
+    let s = Setup::new();
+    let contract_addr = s.client.address.clone();
+    let future = s.env.ledger().timestamp() + DAY;
+    let uri = String::from_str(&s.env, "ipfs://relief");
+
+    // Admin cannot register the contract itself as a verifier
+    assert_eq!(
+        s.client.try_add_verifier(&contract_addr),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert!(!s.client.is_verifier(&contract_addr));
+
+    // Contract cannot register itself with a bond
+    s.client.set_bond_requirement(&100);
+    assert_eq!(
+        s.client.try_register_with_bond(&contract_addr, &100),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    // Campaign creation rejects contract address as verifier
+    let res = s.client.try_create_campaign(
+        &s.creator,
+        &s.beneficiary,
+        &contract_addr,
+        &s.token.address,
+        &CampaignKind::Emergency,
+        &uri,
+        &future,
+        &vec![&s.env, 100],
+    );
+    assert_eq!(res, Err(Ok(Error::NotVerifier)));
+
+    // Reassigning verifier to contract address is also rejected
+    let id = s.campaign();
+    assert_eq!(
+        s.client.try_reassign_verifier(&id, &contract_addr),
+        Err(Ok(Error::NotVerifier))
+    );
 }

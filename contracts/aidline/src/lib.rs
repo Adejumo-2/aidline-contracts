@@ -117,15 +117,20 @@ impl Aidline {
     ///
     /// # Errors
     /// - [`Error::Unauthorized`]: caller is not the admin (enforced via
-    ///   `require_auth` on the stored admin address).
-    pub fn add_verifier(env: Env, verifier: Address) {
+    ///   `require_auth` on the stored admin address) or `verifier` is the
+    ///   contract address itself.
+    pub fn add_verifier(env: Env, verifier: Address) -> Result<(), Error> {
         storage::admin(&env).require_auth();
+        if verifier == env.current_contract_address() {
+            return Err(Error::Unauthorized);
+        }
         storage::set_verifier(&env, &verifier, true);
         VerifierUpdated {
             verifier,
             active: true,
         }
         .publish(&env);
+        Ok(())
     }
 
     /// Deactivates `verifier`, preventing them from approving future milestones.
@@ -464,10 +469,14 @@ impl Aidline {
     /// # Errors
     /// - [`Error::BondRequired`]: `bond_amount` is below the required minimum
     ///   or is zero.
-    /// - [`Error::Unauthorized`]: `verifier` is already registered.
+    /// - [`Error::Unauthorized`]: `verifier` is already registered or is the
+    ///   contract address itself.
     pub fn register_with_bond(env: Env, verifier: Address, bond_amount: i128) -> Result<(), Error> {
         Self::ensure_current_schema(&env)?;
         verifier.require_auth();
+        if verifier == env.current_contract_address() {
+            return Err(Error::Unauthorized);
+        }
 
         let required = storage::bond_requirement(&env);
         if bond_amount < required || bond_amount <= 0 {
@@ -718,6 +727,7 @@ impl Aidline {
     /// Emits [`CampaignCreated`].
     ///
     /// # Errors
+    /// - [`Error::Unauthorized`]: `beneficiary` is the contract address itself.
     /// - [`Error::UriTooLong`]: `metadata_uri` exceeds [`MAX_URI_LENGTH`] bytes.
     /// - [`Error::ConflictOfInterest`]: `verifier` is equal to `creator` or
     ///   `beneficiary`.
@@ -893,6 +903,10 @@ impl Aidline {
         creator.require_auth();
         storage::bump_instance(&env);
 
+        let contract = env.current_contract_address();
+        if beneficiary == contract {
+            return Err(Error::Unauthorized);
+        }
         if min_donation < 0 {
             return Err(Error::InvalidAmount);
         }
@@ -920,7 +934,7 @@ impl Aidline {
             if seen.contains(&v) {
                 return Err(Error::DuplicateVerifier);
             }
-            if !storage::is_verifier(&env, &v) {
+            if v == contract || !storage::is_verifier(&env, &v) {
                 return Err(Error::NotVerifier);
             }
             seen.push_back(v);
@@ -1067,8 +1081,12 @@ impl Aidline {
         if beneficiaries.is_empty() || beneficiaries.len() > MAX_BENEFICIARIES {
             return Err(Error::InvalidBeneficiaries);
         }
+        let contract = env.current_contract_address();
         let mut total_bps: u32 = 0;
         for (i, b) in beneficiaries.iter().enumerate() {
+            if b.to == contract {
+                return Err(Error::Unauthorized);
+            }
             if b.bps == 0 {
                 return Err(Error::InvalidBeneficiaries);
             }
@@ -2271,7 +2289,9 @@ impl Aidline {
             return Err(Error::MaxVerifierReassignmentsExceeded);
         }
 
-        if !storage::is_verifier(&env, &new_verifier) {
+        if new_verifier == env.current_contract_address()
+            || !storage::is_verifier(&env, &new_verifier)
+        {
             return Err(Error::NotVerifier);
         }
 
