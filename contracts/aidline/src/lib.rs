@@ -1277,7 +1277,7 @@ impl Aidline {
     /// # Errors
     /// - [`Error::InvalidChallengeWindow`]: `challenge_window` exceeds
     ///   [`MAX_CHALLENGE_WINDOW`].
-    pub fn create_campaign_with_challenge_window(
+    pub fn create_campaign_challenge_window(
         env: Env,
         creator: Address,
         beneficiary: Address,
@@ -1361,7 +1361,13 @@ impl Aidline {
             index: pending.index,
         }
         .publish(&env);
-        Self::release_milestone(&env, campaign, pending.index, milestone_amount, pending.proof_uri)
+        Self::release_milestone(
+            &env,
+            campaign,
+            pending.index,
+            milestone_amount,
+            pending.proof_uri,
+        )
     }
 
     /// Blocks a proposed approval during its challenge window (Issue #115).
