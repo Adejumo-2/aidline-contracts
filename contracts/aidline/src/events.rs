@@ -169,6 +169,21 @@ impl AdminProposed {
     }
 }
 
+/// Emitted when the current admin nominates a candidate for two-step admin transfer.
+pub struct AdminNominated {
+    pub current_admin: Address,
+    pub pending_admin: Address,
+}
+
+impl AdminNominated {
+    pub fn publish(&self, env: &Env) {
+        env.events().publish(
+            (symbol_short!("adm_nom"), self.current_admin.clone()),
+            self.pending_admin.clone(),
+        );
+    }
+}
+
 /// Emitted when the pending admin accepts the transfer.
 pub struct AdminAccepted {
     pub old_admin: Address,

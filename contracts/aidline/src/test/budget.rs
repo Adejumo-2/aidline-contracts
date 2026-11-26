@@ -83,14 +83,14 @@ fn check(s: &Setup, call: &str) {
 fn main_calls_stay_within_their_resource_ceilings() {
     let s = Setup::new();
     let donor = s.donor(5_000);
-    let sponsor = s.donor(5_000);
+    let sponsor = s.donor(5_000_000);
 
     start(&s);
     let id = s.campaign();
     check(&s, "create_campaign");
 
     s.client
-        .deposit_sponsor_pool(&sponsor, &id, &5_000, &500, &500);
+        .deposit_sponsor_pool(&sponsor, &id, &5_000, &1_000_000, &1_000_000);
 
     start(&s);
     s.client.donate(&donor, &id, &400);

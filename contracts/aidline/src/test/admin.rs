@@ -180,3 +180,78 @@ fn non_admin_cannot_propose_admin() {
     assert_eq!(res.unwrap_err().unwrap(), expected_auth_err);
     assert_eq!(s.client.pending_admin(), None);
 }
+
+#[test]
+fn nominate_admin_and_accept_flow_works() {
+    let s = Setup::new();
+    let candidate = Address::generate(&s.env);
+    let candidate2 = Address::generate(&s.env);
+    let extra_verifier = Address::generate(&s.env);
+
+    // Nominate first candidate
+    s.client.nominate_admin(&candidate);
+    assert!(
+        !s.env.events().all().events().is_empty(),
+        "AdminNominated event not emitted"
+    );
+    assert_eq!(s.client.pending_admin(), Some(candidate.clone()));
+    assert_eq!(s.client.admin(), s.admin);
+
+    // Candidate cannot execute admin functions before accept_admin
+    let auth_candidate_before = MockAuth {
+        address: &candidate,
+        invoke: &MockAuthInvoke {
+            contract: &s.client.address,
+            fn_name: "add_verifier",
+            args: (extra_verifier.clone(),).into_val(&s.env),
+            sub_invokes: &[],
+        },
+    };
+    let res = s
+        .client
+        .mock_auths(&[auth_candidate_before])
+        .try_add_verifier(&extra_verifier);
+    assert_eq!(res.unwrap_err(), Err(InvokeError::Abort));
+    assert!(!s.client.is_verifier(&extra_verifier));
+
+    // Re-nominating replaces the pending candidate
+    s.client.nominate_admin(&candidate2);
+    assert_eq!(s.client.pending_admin(), Some(candidate2.clone()));
+
+    let auth_accept_c2 = MockAuth {
+        address: &candidate2,
+        invoke: &MockAuthInvoke {
+            contract: &s.client.address,
+            fn_name: "accept_admin",
+            args: ().into_val(&s.env),
+            sub_invokes: &[],
+        },
+    };
+    s.client.mock_auths(&[auth_accept_c2]).accept_admin();
+    assert_eq!(s.client.admin(), candidate2);
+    assert_eq!(s.client.pending_admin(), None);
+}
+
+#[test]
+fn non_admin_cannot_nominate_admin() {
+    let s = Setup::new();
+    let stranger = Address::generate(&s.env);
+    let candidate = Address::generate(&s.env);
+
+    let auth = MockAuth {
+        address: &stranger,
+        invoke: &MockAuthInvoke {
+            contract: &s.client.address,
+            fn_name: "nominate_admin",
+            args: (candidate.clone(),).into_val(&s.env),
+            sub_invokes: &[],
+        },
+    };
+    let expected_auth_err = soroban_sdk::Error::from_type_and_code(
+        soroban_sdk::xdr::ScErrorType::Context,
+        soroban_sdk::xdr::ScErrorCode::InvalidAction,
+    );
+    let res = s.client.mock_auths(&[auth]).try_nominate_admin(&candidate);
+    assert_eq!(res.unwrap_err().unwrap(), expected_auth_err);
+    assert_eq!(s.client.pending_admin(), None);
+}
