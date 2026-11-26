@@ -39,7 +39,7 @@ fn campaign_without_stretch_behaves_like_a_plain_campaign() {
     let donor = s.donor(2_000);
     s.client.donate(&donor, &id, &1_000);
     assert_eq!(
-        s.client.try_donate(&donor, &id, &1),
+        s.client.try_donate(&donor, &id, &MIN_DONATION_AMOUNT),
         Err(Ok(Error::GoalExceeded))
     );
 }
@@ -57,7 +57,7 @@ fn donations_past_the_base_goal_are_accepted_up_to_the_stretch_total() {
     assert_eq!(s.client.donate(&donor, &id, &600), 300);
     assert_eq!(s.client.get_campaign(&id).raised, 1_500);
     assert_eq!(
-        s.client.try_donate(&donor, &id, &1),
+        s.client.try_donate(&donor, &id, &MIN_DONATION_AMOUNT),
         Err(Ok(Error::GoalExceeded))
     );
 }

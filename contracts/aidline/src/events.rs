@@ -577,8 +577,10 @@ pub struct SlasherChanged {
 
 impl SlasherChanged {
     pub fn publish(&self, env: &Env) {
-        env.events()
-            .publish((symbol_short!("slasher"),), (self.old.clone(), self.new.clone()));
+        env.events().publish(
+            (symbol_short!("slasher"),),
+            (self.old.clone(), self.new.clone()),
+        );
     }
 }
 

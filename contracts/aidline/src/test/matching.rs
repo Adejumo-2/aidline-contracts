@@ -106,7 +106,10 @@ fn matching_is_capped_to_the_actual_donation_and_cannot_repeat() {
     assert_eq!(s.client.apply_matching(&sponsor, &id, &donor, &400), 100);
     // The same donation cannot be matched twice.
     assert_eq!(s.client.apply_matching(&sponsor, &id, &donor, &400), 0);
-    assert_eq!(s.client.get_sponsor_pool(&id, &sponsor).unwrap().matched, 100);
+    assert_eq!(
+        s.client.get_sponsor_pool(&id, &sponsor).unwrap().matched,
+        100
+    );
 }
 
 #[test]

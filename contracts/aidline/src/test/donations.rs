@@ -22,7 +22,7 @@ fn three_donors_reach_goal_exactly_fourth_fails() {
 
     // A fourth donation of any amount must fail with GoalExceeded.
     assert_eq!(
-        s.client.try_donate(&d4, &id, &1),
+        s.client.try_donate(&d4, &id, &MIN_DONATION_AMOUNT),
         Err(Ok(Error::GoalExceeded))
     );
     assert_eq!(
@@ -58,7 +58,7 @@ fn two_donors_reach_goal_exactly_campaign_fully_funded() {
     // Campaign is exactly at goal, no room for even 1 more token.
     let d3 = s.donor(10);
     assert_eq!(
-        s.client.try_donate(&d3, &id, &1),
+        s.client.try_donate(&d3, &id, &MIN_DONATION_AMOUNT),
         Err(Ok(Error::GoalExceeded))
     );
 
