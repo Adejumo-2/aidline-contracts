@@ -524,7 +524,9 @@ fuzz_target!(|data: &[u8]| {
         // Invariant 9: Completed/Cancelled campaign blocks new donations.
         if model.status == CampaignStatus::Completed || model.status == CampaignStatus::Cancelled {
             assert!(
-                client.try_donate(&donor_a, &campaign_id, &1).is_err(),
+                client
+                    .try_donate(&donor_a, &campaign_id, &aidline::MIN_DONATION_AMOUNT)
+                    .is_err(),
                 "donate succeeded on a finished campaign"
             );
             assert!(

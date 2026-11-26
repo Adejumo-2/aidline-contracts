@@ -82,9 +82,33 @@ fn minimum_donation_of_zero_behaves_as_normal() {
     let id = s.campaign_with_min_donation(0);
     let donor = s.donor(100);
 
-    // Any positive donation is accepted when min_donation is 0.
-    let accepted = s.client.donate(&donor, &id, &1);
-    assert_eq!(accepted, 1);
+    // Any donation at or above MIN_DONATION_AMOUNT is accepted when min_donation is 0.
+    let accepted = s.client.donate(&donor, &id, &MIN_DONATION_AMOUNT);
+    assert_eq!(accepted, MIN_DONATION_AMOUNT);
+}
+
+#[test]
+fn test_donate_dust_spam_rejected() {
+    let s = Setup::new();
+    let id = s.campaign();
+    let donor = s.donor(100);
+
+    // 1-stroop dust donation must be rejected with InvalidAmount
+    let res = s.client.try_donate(&donor, &id, &1);
+    assert_eq!(res, Err(Ok(Error::InvalidAmount)));
+}
+
+#[test]
+fn test_donate_exact_minimum_succeeds() {
+    let s = Setup::new();
+    let id = s.campaign();
+    let donor = s.donor(100);
+
+    // Donating exactly MIN_DONATION_AMOUNT must succeed
+    let accepted = s.client.donate(&donor, &id, &MIN_DONATION_AMOUNT);
+    assert_eq!(accepted, MIN_DONATION_AMOUNT);
+    assert_eq!(s.client.get_campaign(&id).raised, MIN_DONATION_AMOUNT);
+    assert_eq!(s.client.contribution_of(&id, &donor), MIN_DONATION_AMOUNT);
 }
 
 #[test]

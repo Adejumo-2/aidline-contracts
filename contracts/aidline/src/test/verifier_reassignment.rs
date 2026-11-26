@@ -124,6 +124,25 @@ fn verifier_reassignments_view_errors_for_nonexistent_campaign() {
 }
 
 #[test]
+fn reassign_verifier_rejects_campaign_beneficiary() {
+    let s = Setup::new();
+    let id = s.campaign();
+
+    // Register beneficiary as a verifier in the system
+    s.client.add_verifier(&s.beneficiary);
+
+    // Admin attempts to reassign the campaign's verifier to the beneficiary
+    let res = s.client.try_reassign_verifier(&id, &s.beneficiary);
+    assert_eq!(res, Err(Ok(Error::VerifierCannotBeBeneficiary)));
+
+    // Legitimate reassignment to a distinct registered verifier succeeds
+    let new_v = Address::generate(&s.env);
+    s.client.add_verifier(&new_v);
+    assert!(s.client.try_reassign_verifier(&id, &new_v).is_ok());
+    assert_eq!(s.client.get_campaign(&id).verifier, new_v);
+}
+
+#[test]
 fn reassigning_to_the_beneficiary_or_creator_is_rejected() {
     let s = Setup::new();
     let id = s.campaign();
@@ -132,7 +151,7 @@ fn reassigning_to_the_beneficiary_or_creator_is_rejected() {
 
     assert_eq!(
         s.client.try_reassign_verifier(&id, &s.beneficiary),
-        Err(Ok(Error::ConflictOfInterest))
+        Err(Ok(Error::VerifierCannotBeBeneficiary))
     );
     assert_eq!(
         s.client.try_reassign_verifier(&id, &s.creator),

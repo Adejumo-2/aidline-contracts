@@ -14,6 +14,8 @@
 // recorded: run `cargo test budget -- --nocapture`, which prints the measured
 // numbers, then set each ceiling about 25 percent above its number and write
 // the measured value next to it in the table above.
+extern crate std;
+
 use super::*;
 
 struct Ceiling {

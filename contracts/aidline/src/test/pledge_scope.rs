@@ -68,7 +68,7 @@ fn finished_pledges_leave_the_campaign_list() {
     let s = Setup::new();
     let p = pledger(&s);
     let id = pledged_campaign(&s, &p, 2);
-    let donor = s.donor(1_000);
+    let donor = s.donor(998);
     s.client.donate(&donor, &id, &998);
 
     s.client.approve_milestone(&id, &s.proof());

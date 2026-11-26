@@ -47,6 +47,10 @@ const MAX_MILESTONES: u32 = 20;
 const MAX_URI_LENGTH: u32 = 256;
 /// Maximum length in bytes for milestone proof URIs.
 pub const MAX_PROOF_URI_LENGTH: u32 = 500;
+/// Maximum length in bytes for campaign metadata URIs.
+pub const MAX_METADATA_URI_LENGTH: u32 = 500;
+/// Minimum donation amount accepted by the contract to eliminate storage dust spam.
+pub const MIN_DONATION_AMOUNT: i128 = 10;
 /// Maximum matching ratio (100 % = 10 000 bps).
 const MAX_RATIO_BPS: u32 = 10_000;
 /// Minimum deposit and cap for a sponsor matching pool (Issue #158).
@@ -831,7 +835,8 @@ impl Aidline {
     ///
     /// # Errors
     /// - [`Error::Unauthorized`]: `beneficiary` is the contract address itself.
-    /// - [`Error::UriTooLong`]: `metadata_uri` exceeds [`MAX_URI_LENGTH`] bytes.
+    /// - [`Error::InvalidMetadataUri`]: `metadata_uri` is empty or exceeds
+    ///   [`MAX_METADATA_URI_LENGTH`] bytes.
     /// - [`Error::ConflictOfInterest`]: `verifier` is equal to `creator` or
     ///   `beneficiary`.
     /// - [`Error::NotVerifier`]: `verifier` is not currently registered.
@@ -1013,8 +1018,8 @@ impl Aidline {
         if min_donation < 0 {
             return Err(Error::InvalidAmount);
         }
-        if metadata_uri.len() > MAX_URI_LENGTH {
-            return Err(Error::UriTooLong);
+        if metadata_uri.is_empty() || metadata_uri.len() > MAX_METADATA_URI_LENGTH {
+            return Err(Error::InvalidMetadataUri);
         }
         if verifiers.contains(&creator) || verifiers.contains(&beneficiary) {
             return Err(Error::ConflictOfInterest);
@@ -1612,7 +1617,7 @@ impl Aidline {
     /// Emits [`Donated`] with the accepted amount.
     ///
     /// # Errors
-    /// - [`Error::InvalidAmount`]: `amount` is zero or negative.
+    /// - [`Error::InvalidAmount`]: `amount` is below [`MIN_DONATION_AMOUNT`].
     /// - [`Error::DonationBelowMinimum`]: `amount` is below the campaign's
     ///   `min_donation` and does not reach the remaining goal.
     /// - [`Error::CampaignNotFound`]: no campaign with `campaign_id` exists.
@@ -1626,7 +1631,7 @@ impl Aidline {
         if storage::is_paused(&env) {
             return Err(Error::Paused);
         }
-        if amount <= 0 {
+        if amount < MIN_DONATION_AMOUNT {
             return Err(Error::InvalidAmount);
         }
 
@@ -2810,9 +2815,9 @@ impl Aidline {
     /// - [`Error::CampaignNotFound`]: no campaign with `campaign_id` exists.
     /// - [`Error::CampaignNotActive`]: campaign is not in `Active` status.
     /// - [`Error::CampaignExpired`]: campaign deadline has passed.
+    /// - [`Error::VerifierCannotBeBeneficiary`]: `new_verifier` is the campaign's beneficiary.
     /// - [`Error::NotVerifier`]: `new_verifier` is not currently registered.
-    /// - [`Error::ConflictOfInterest`]: `new_verifier` is the campaign's creator
-    ///   or beneficiary.
+    /// - [`Error::ConflictOfInterest`]: `new_verifier` is the campaign's creator.
     pub fn reassign_verifier(
         env: Env,
         campaign_id: u64,
@@ -2834,13 +2839,17 @@ impl Aidline {
             return Err(Error::MaxVerifierReassignmentsExceeded);
         }
 
+        if new_verifier == campaign.beneficiary {
+            return Err(Error::VerifierCannotBeBeneficiary);
+        }
+
         if new_verifier == env.current_contract_address()
             || !storage::is_verifier(&env, &new_verifier)
         {
             return Err(Error::NotVerifier);
         }
 
-        if new_verifier == campaign.beneficiary || new_verifier == campaign.creator {
+        if new_verifier == campaign.creator {
             return Err(Error::ConflictOfInterest);
         }
 

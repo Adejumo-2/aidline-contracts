@@ -123,4 +123,7 @@ pub enum Error {
     InvalidChallengeWindow = 64,
     WindowClosed = 65,
     AlreadyChallenged = 66,
+
+    // Verifier reassignment
+    VerifierCannotBeBeneficiary = 67,
 }
