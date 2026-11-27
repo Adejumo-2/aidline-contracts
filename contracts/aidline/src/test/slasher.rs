@@ -15,7 +15,7 @@ fn only_signed_by(s: &Setup, who: &Address, v: &Address, id: u64) -> Result<(), 
     match s
         .client
         .mock_auths(&[auth])
-        .try_slash_verifier(who, v, &id, &100)
+        .try_slash_verifier(v, &id, &100)
     {
         Ok(Ok(())) => Ok(()),
         _ => Err(()),
@@ -38,7 +38,10 @@ fn only_the_new_slasher_can_slash_and_the_admin_cannot() {
     let s = Setup::new();
     let slasher = Address::generate(&s.env);
     s.client.set_slasher(&slasher);
-    assert!(!s.env.events().all().events().is_empty(), "SlasherChanged event");
+    assert!(
+        !s.env.events().all().events().is_empty(),
+        "SlasherChanged event"
+    );
     assert_eq!(s.client.get_slasher(), slasher);
 
     let v = s.bonded_verifier(1_000, 400);
@@ -65,7 +68,12 @@ fn only_the_admin_can_change_the_slasher() {
             sub_invokes: &[],
         },
     };
-    assert!(s.client.mock_auths(&[auth]).try_set_slasher(&slasher).is_err());
+    assert!(
+        s.client
+            .mock_auths(&[auth])
+            .try_set_slasher(&slasher)
+            .is_err()
+    );
     assert_eq!(s.client.get_slasher(), s.admin);
 }
 
@@ -96,11 +104,12 @@ fn queueing_a_slash_needs_the_slasher_not_the_admin() {
             sub_invokes: &[],
         },
     };
-    assert!(s
-        .client
-        .mock_auths(&[admin_only])
-        .try_queue_action(&action)
-        .is_err());
+    assert!(
+        s.client
+            .mock_auths(&[admin_only])
+            .try_queue_action(&action)
+            .is_err()
+    );
 
     // The slasher can.
     let by_slasher = MockAuth {
@@ -118,4 +127,3 @@ fn queueing_a_slash_needs_the_slasher_not_the_admin() {
     s.client
         .queue_action(&crate::TimelockedAction::SetBondRequirement(500));
 }
-

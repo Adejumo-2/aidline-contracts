@@ -40,9 +40,9 @@ fn every_persistent_key_is_extended_by_the_call_that_writes_it() {
     assert_extended(&s, DataKey::Contribution(id, donor.clone()));
     assert_extended(&s, DataKey::CampaignDonors(id));
 
-    let sponsor = s.donor(1_000);
+    let sponsor = s.donor(1_000_000);
     s.client
-        .deposit_sponsor_pool(&sponsor, &id, &5_000, &500, &500);
+        .deposit_sponsor_pool(&sponsor, &id, &5_000, &1_000_000, &1_000_000);
     assert_extended(&s, DataKey::SponsorPool(id, sponsor.clone()));
 
     let pledger = s.donor(500);
@@ -310,6 +310,9 @@ fn state_changing_calls_extend_the_instance_entry() {
     }
 
     // Admin hand-over last, since it changes who the admin is.
+    age_instance(&s);
+    s.client.nominate_admin(&extra);
+    assert!(instance_ttl(&s) >= INSTANCE_THRESHOLD, "nominate_admin");
     age_instance(&s);
     s.client.propose_admin(&extra);
     assert!(instance_ttl(&s) >= INSTANCE_THRESHOLD, "propose_admin");

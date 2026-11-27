@@ -107,14 +107,28 @@ fn rejects_bad_milestones_and_deadline() {
 }
 
 #[test]
-fn rejects_long_metadata_uri() {
+fn rejects_invalid_metadata_uri() {
     let s = Setup::new();
     let future = s.env.ledger().timestamp() + DAY;
 
-    // 257 bytes should fail with UriTooLong
-    let long_str = "a".repeat(257);
+    // Empty metadata URI should fail with InvalidMetadataUri
+    let empty_uri = String::from_str(&s.env, "");
+    let res_empty = s.client.try_create_campaign(
+        &s.creator,
+        &s.beneficiary,
+        &s.verifier,
+        &s.token.address,
+        &CampaignKind::Climate,
+        &empty_uri,
+        &future,
+        &vec![&s.env, 100],
+    );
+    assert_eq!(res_empty, Err(Ok(Error::InvalidMetadataUri)));
+
+    // 501 bytes should fail with InvalidMetadataUri
+    let long_str = "a".repeat(501);
     let long_uri = String::from_str(&s.env, &long_str);
-    let res = s.client.try_create_campaign(
+    let res_long = s.client.try_create_campaign(
         &s.creator,
         &s.beneficiary,
         &s.verifier,
@@ -124,10 +138,10 @@ fn rejects_long_metadata_uri() {
         &future,
         &vec![&s.env, 100],
     );
-    assert_eq!(res, Err(Ok(Error::UriTooLong)));
+    assert_eq!(res_long, Err(Ok(Error::InvalidMetadataUri)));
 
-    // Exact limit 256 bytes should succeed
-    let max_str = "a".repeat(256);
+    // Exact limit 500 bytes should succeed
+    let max_str = "a".repeat(500);
     let max_uri = String::from_str(&s.env, &max_str);
     let ok_res = s.client.try_create_campaign(
         &s.creator,
@@ -140,6 +154,47 @@ fn rejects_long_metadata_uri() {
         &vec![&s.env, 100],
     );
     assert!(ok_res.is_ok());
+
+    // Valid IPFS URI succeeds
+    let ipfs_uri = String::from_str(&s.env, "ipfs://bafybeicg2gg33zrqb33rqd6dffq72u7i7743rqd6d");
+    let ok_ipfs = s.client.try_create_campaign(
+        &s.creator,
+        &s.beneficiary,
+        &s.verifier,
+        &s.token.address,
+        &CampaignKind::Climate,
+        &ipfs_uri,
+        &future,
+        &vec![&s.env, 100],
+    );
+    assert!(ok_ipfs.is_ok());
+
+    // create_campaign_with_due_dates also validates metadata_uri
+    let res_due_empty = s.client.try_create_campaign_with_due_dates(
+        &s.creator,
+        &s.beneficiary,
+        &s.verifier,
+        &s.token.address,
+        &CampaignKind::Climate,
+        &empty_uri,
+        &future,
+        &vec![&s.env, 100],
+        &vec![&s.env, future - 10],
+    );
+    assert_eq!(res_due_empty, Err(Ok(Error::InvalidMetadataUri)));
+
+    let res_due_long = s.client.try_create_campaign_with_due_dates(
+        &s.creator,
+        &s.beneficiary,
+        &s.verifier,
+        &s.token.address,
+        &CampaignKind::Climate,
+        &long_uri,
+        &future,
+        &vec![&s.env, 100],
+        &vec![&s.env, future - 10],
+    );
+    assert_eq!(res_due_long, Err(Ok(Error::InvalidMetadataUri)));
 }
 
 #[test]
@@ -345,8 +400,8 @@ fn expired_campaign_allows_refund_and_blocks_activity() {
 #[test]
 fn refund_pro_rata_overflow_returns_invalid_amount() {
     let s = Setup::new();
-    let half_max = i128::MAX / 2;
-    let milestones = vec![&s.env, half_max, half_max];
+    let donor1_amount: i128 = 2_000_000_000_000_000_000_000_000_000_000;
+    let milestones = vec![&s.env, donor1_amount, donor1_amount];
     let id = s.client.create_campaign(
         &s.creator,
         &s.beneficiary,
@@ -358,15 +413,15 @@ fn refund_pro_rata_overflow_returns_invalid_amount() {
         &milestones,
     );
 
-    let donor1 = s.donor(half_max);
-    let donor2 = s.donor(1);
+    let donor1 = s.donor(donor1_amount);
+    let donor2 = s.donor(MIN_DONATION_AMOUNT);
 
-    s.client.donate(&donor1, &id, &half_max);
-    s.client.donate(&donor2, &id, &1);
+    s.client.donate(&donor1, &id, &donor1_amount);
+    s.client.donate(&donor2, &id, &MIN_DONATION_AMOUNT);
 
     s.client.cancel_campaign(&s.creator, &id);
 
-    // donor1: contributed = half_max, unreleased = half_max + 1.
+    // donor1: contributed = donor1_amount, unreleased = donor1_amount + MIN_DONATION_AMOUNT.
     // contributed * unreleased overflows i128::MAX -> returns Err(Ok(Error::InvalidAmount))
     assert_eq!(
         s.client.try_refund(&donor1, &id),
@@ -378,10 +433,10 @@ fn refund_pro_rata_overflow_returns_invalid_amount() {
     );
     assert_eq!(s.client.refundable_amount(&id, &donor1), 0);
 
-    // donor2: contributed = 1, unreleased = half_max + 1.
-    // 1 * (half_max + 1) does not overflow -> succeeds
+    // donor2: contributed = MIN_DONATION_AMOUNT, unreleased = donor1_amount + MIN_DONATION_AMOUNT.
+    // MIN_DONATION_AMOUNT * (donor1_amount + MIN_DONATION_AMOUNT) does not overflow -> succeeds
     let refunded2 = s.client.refund(&donor2, &id);
-    assert_eq!(refunded2, 1);
+    assert_eq!(refunded2, MIN_DONATION_AMOUNT);
 }
 
 // ─── Issue #169: Unfunded campaign cancellation & storage cleanup ────────────

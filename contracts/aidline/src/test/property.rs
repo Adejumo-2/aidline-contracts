@@ -260,14 +260,14 @@ fn test_sponsor_matching_properties_contract_integration() {
     // 3. deposited == remaining + matched
     // 4. return pays back exactly remaining
     let s = Setup::new();
-    let sponsor = s.donor(1_000_000);
+    let sponsor = s.donor(10_000_000);
     let donor = s.donor(1_000_000);
 
     // Test ratio 1, ratio 10_000, and amount near the goal
     for &(ratio, cap, goal, near_goal_gap) in &[
-        (1u32, 500i128, 1_000i128, 5i128),
-        (10_000u32, 500i128, 1_000i128, 50i128),
-        (5_000u32, 200i128, 1_000i128, 2i128),
+        (1u32, 1_000_000i128, 1_000i128, 5i128),
+        (10_000u32, 1_000_000i128, 1_000i128, 50i128),
+        (5_000u32, 1_000_000i128, 1_000i128, 2i128),
     ] {
         let id = s.client.create_campaign(
             &s.creator,
@@ -330,7 +330,7 @@ fn test_accounting_invariants_across_random_call_sequences() {
         let mut rng = SimpleRng::new(seed);
 
         let s = Setup::new();
-        let sponsor = s.donor(100_000);
+        let sponsor = s.donor(10_000_000);
         let donor1 = s.donor(100_000);
         let donor2 = s.donor(100_000);
         let donors = [donor1, donor2];
@@ -351,8 +351,8 @@ fn test_accounting_invariants_across_random_call_sequences() {
         let campaigns = [c0, c1];
 
         // Deposit sponsor pools on both campaigns
-        let pool_cap_0 = 500i128;
-        let pool_cap_1 = 400i128;
+        let pool_cap_0 = 1_000_000i128;
+        let pool_cap_1 = 1_000_000i128;
         s.client
             .deposit_sponsor_pool(&sponsor, &c0, &5_000, &pool_cap_0, &pool_cap_0);
         s.client

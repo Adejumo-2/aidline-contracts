@@ -14,6 +14,8 @@
 // recorded: run `cargo test budget -- --nocapture`, which prints the measured
 // numbers, then set each ceiling about 25 percent above its number and write
 // the measured value next to it in the table above.
+extern crate std;
+
 use super::*;
 
 struct Ceiling {
@@ -23,11 +25,31 @@ struct Ceiling {
 }
 
 const CEILINGS: [Ceiling; 5] = [
-    Ceiling { call: "create_campaign", cpu: 25_000_000, memory: 10_485_760 },
-    Ceiling { call: "donate", cpu: 25_000_000, memory: 10_485_760 },
-    Ceiling { call: "approve_milestone", cpu: 25_000_000, memory: 10_485_760 },
-    Ceiling { call: "refund", cpu: 25_000_000, memory: 10_485_760 },
-    Ceiling { call: "apply_matching", cpu: 25_000_000, memory: 10_485_760 },
+    Ceiling {
+        call: "create_campaign",
+        cpu: 25_000_000,
+        memory: 10_485_760,
+    },
+    Ceiling {
+        call: "donate",
+        cpu: 25_000_000,
+        memory: 10_485_760,
+    },
+    Ceiling {
+        call: "approve_milestone",
+        cpu: 25_000_000,
+        memory: 10_485_760,
+    },
+    Ceiling {
+        call: "refund",
+        cpu: 25_000_000,
+        memory: 10_485_760,
+    },
+    Ceiling {
+        call: "apply_matching",
+        cpu: 25_000_000,
+        memory: 10_485_760,
+    },
 ];
 
 /// Resets the host budget so the next contract call is measured on its own.
@@ -42,7 +64,7 @@ fn check(s: &Setup, call: &str) {
     let budget = s.env.cost_estimate().budget();
     let cpu = budget.cpu_instruction_cost();
     let memory = budget.memory_bytes_cost();
-    println!("budget {call}: {cpu} CPU instructions, {memory} memory bytes");
+    std::println!("budget {call}: {cpu} CPU instructions, {memory} memory bytes");
     assert!(
         cpu <= ceiling.cpu,
         "{call} used {cpu} CPU instructions, over its ceiling of {} by {}",
@@ -61,14 +83,14 @@ fn check(s: &Setup, call: &str) {
 fn main_calls_stay_within_their_resource_ceilings() {
     let s = Setup::new();
     let donor = s.donor(5_000);
-    let sponsor = s.donor(5_000);
+    let sponsor = s.donor(5_000_000);
 
     start(&s);
     let id = s.campaign();
     check(&s, "create_campaign");
 
     s.client
-        .deposit_sponsor_pool(&sponsor, &id, &5_000, &500, &500);
+        .deposit_sponsor_pool(&sponsor, &id, &5_000, &1_000_000, &1_000_000);
 
     start(&s);
     s.client.donate(&donor, &id, &400);
@@ -98,7 +120,11 @@ fn every_call_in_the_ceiling_table_is_measured() {
         "apply_matching",
     ];
     for ceiling in CEILINGS.iter() {
-        assert!(measured.contains(&ceiling.call), "{} has no measurement", ceiling.call);
+        assert!(
+            measured.contains(&ceiling.call),
+            "{} has no measurement",
+            ceiling.call
+        );
     }
     assert_eq!(CEILINGS.len(), measured.len());
 }

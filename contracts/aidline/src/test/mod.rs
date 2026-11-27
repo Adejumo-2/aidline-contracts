@@ -14,7 +14,9 @@ use soroban_sdk::{
     vec,
 };
 
-use crate::{Aidline, AidlineClient, BondStatus, CampaignKind, CampaignStatus, Error};
+use crate::{
+    Aidline, AidlineClient, BondStatus, CampaignKind, CampaignStatus, Error, MIN_DONATION_AMOUNT,
+};
 
 /// Seconds in a day, used to build deadlines and bond delays.
 const DAY: u64 = 86_400;
