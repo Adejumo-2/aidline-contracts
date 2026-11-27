@@ -129,7 +129,7 @@ fn reassign_verifier_rejects_campaign_beneficiary() {
     let id = s.campaign();
 
     // Register beneficiary as a verifier in the system
-    s.client.add_verifier(&s.beneficiary);
+    s.client.add_verifier(&s.admin, &s.beneficiary);
 
     // Admin attempts to reassign the campaign's verifier to the beneficiary
     let res = s.client.try_reassign_verifier(&id, &s.beneficiary);
@@ -137,7 +137,7 @@ fn reassign_verifier_rejects_campaign_beneficiary() {
 
     // Legitimate reassignment to a distinct registered verifier succeeds
     let new_v = Address::generate(&s.env);
-    s.client.add_verifier(&new_v);
+    s.client.add_verifier(&s.admin, &new_v);
     assert!(s.client.try_reassign_verifier(&id, &new_v).is_ok());
     assert_eq!(s.client.get_campaign(&id).verifier, new_v);
 }

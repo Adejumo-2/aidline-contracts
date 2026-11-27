@@ -15,7 +15,7 @@ fn only_signed_by(s: &Setup, who: &Address, v: &Address, id: u64) -> Result<(), 
     match s
         .client
         .mock_auths(&[auth])
-        .try_slash_verifier(v, &id, &100)
+        .try_slash_verifier(who, v, &id, &100)
     {
         Ok(Ok(())) => Ok(()),
         _ => Err(()),

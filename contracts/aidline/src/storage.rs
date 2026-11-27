@@ -101,10 +101,6 @@ pub fn set_role(env: &Env, role: Role, who: &Address, granted: bool) {
     }
 }
 
-pub fn has_custom_slasher(env: &Env) -> bool {
-    env.storage().instance().has(&DataKey::Slasher)
-}
-
 /// The address that may slash verifier bonds. Defaults to the current admin,
 /// so a deployment that never calls `set_slasher` behaves as before.
 pub fn slasher(env: &Env) -> Address {
